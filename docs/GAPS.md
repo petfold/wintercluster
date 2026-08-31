@@ -122,6 +122,16 @@ Then, supplying no key anywhere:
 
 So the second half of the reference *is* the decryption key, possession of the whole reference is sufficient to read the bytes, and the address half alone is useless. Every one of those 64-byte references sits in cleartext in a commit document that any Bee node will serve to anyone holding the root.
 
+**And it is exercisable from the open internet with `curl`.** The same 64-byte reference, handed to the public Swarm gateway at `api.gateway.ethswarm.org`, returned the plaintext:
+
+```
+$ curl https://api.gateway.ethswarm.org/bytes/9f86dbf5...15f6b8
+wintercluster-a1-live-probe: this stands in for a Velero resource tarball
+[http 200, 73B]
+```
+
+No key, no credentials, no Bee node of the reader's own. An attacker needs the reference and nothing else — and the reference is published in a commit document reachable from a feed whose topic is derived from the bucket name. This is not a "someone running a Bee node could" finding; it is a plain HTTPS GET.
+
 Nothing about A1 now rests on fakebee. The one part still modelled rather than observed is the *commit* path against a live node, and it does not need observing: the width check that fails is `mantaray.Node.Add` in the Bee library, evaluated locally on reference bytes before any node call, so the node cannot change the outcome.
 
 Incidental A5 datum: a **light** node served both retrievals without a full node anywhere in the picture, which is the first evidence for tier C's node requirement.
@@ -203,7 +213,17 @@ So tier C's read path needs nothing but a light node and a root. That is the sin
 
 Consequently the erasure-coding half of A5 — the effect of `S3WARM_FETCH_STRATEGY` and `x-swarm-redundancy-strategy` on restore speed — is **not measured** and cannot be measured on a single warm node. It belongs to M6's benchmark harness, which needs a second, cold node in its topology. M6 should treat "the retrieving node must not be the uploading node" as a correctness requirement of the benchmark, not a nicety; the easiest way to get a wrong, flattering number here is to reuse one node.
 
-Still unconfirmed: that the chunks actually propagated to the wider network rather than merely living on the uploading node. A public-gateway fetch of the same references would settle it, and is the natural next step.
+**Propagation confirmed, and with it the first honest cold-retrieval number.** The same references fetched through the public gateway at `api.gateway.ethswarm.org` — a node that never held the data and had to retrieve it from the network:
+
+| Fetch | Result | Time |
+|---|---|---|
+| Commit manifest root | `200`, 512 B | 0.56 s |
+| Small object (42 B) | `200`, 42 B | 0.52 s |
+| 2 MiB object | `200`, 2,097,152 B | 1.80 s — **1.17 MB/s** |
+
+The 2 MiB object was verified byte-identical by SHA-256 against the original. So a light node genuinely pushed the data into the network, the commit chain is retrievable by third parties, and tier C does not depend on the uploading node surviving. That is the property the whole design assumes and it now has direct evidence.
+
+Treat 1.17 MB/s as indicative only, not a benchmark: one object, one sample, through a public gateway that adds its own hop and may cache or rate-limit. It is nonetheless the first number here measured on a node that did not upload the data, and it is roughly 32x slower than the same object served from local store — which is the gap M6 must measure properly.
 
 ## A6 — Snapshot lifetime vs Velero retention
 
