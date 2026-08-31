@@ -41,7 +41,7 @@ These are the load-bearing facts, from s3warm's own reference docs. Do not re-de
 | Feed checkpoints | `-feed-key <hex secp256k1>`; owner = the key's Ethereum address, topic = `keccak256("s3warm/1/" + bucket)`, sequence feed, index = `seq − 1`, payload = the 32-byte commit root | Resolvable on **any** Bee node: `GET /feeds/{owner}/{topic}?type=sequence` — the portable recovery anchor. Verified live upstream. Checkpoint policy is currently every-commit; interval/manual are open upstream |
 | Money keeps itself running | Chequebook auto top-up + opt-in stamp autopilot (`-stamp-autopilot`): tops up batches below `-stamp-ttl-min`, dilutes mutable batches at utilization threshold, Prometheus counters | The stamp-lifecycle keeper this design would otherwise have had to build |
 | S3 dialect coverage | 307 Ceph s3-tests green: multipart (range-stitched composite reads), conditional writes, presigned URLs, streaming signatures, five checksum algorithms, SSE-S3, versioning, tagging, CORS, multi-tenant credentials, Postgres HA index | Everything Velero's stock AWS plugin and Kopia's S3 repository exercise on paper; empirical confirmation is milestone M1 |
-| SSE-S3 | `x-amz-server-side-encryption: AES256` → `swarm-encrypt: true`; Bee encrypts; the 64-byte reference embeds the decryption key and "lives only in the index"; `x-swarm-reference` suppressed on responses | See A1 in §3 — the interaction with the commit chain is the design's one open crux |
+| SSE-S3 | `x-amz-server-side-encryption: AES256` → `swarm-encrypt: true`; Bee encrypts; the 64-byte reference embeds the decryption key and "lives only in the index"; `x-swarm-reference` suppressed on responses | **[CORRECTED]** "lives only in the index" is false for multipart objects — the 64-byte reference reaches the public commit document verbatim. See `docs/GAPS.md` A1 |
 | Delete semantics | Index rows removed; manifest fork removed on next commit; **physical bytes remain until their batch expires** | The ransomware-resistance property, stated plainly in s3warm's own docs |
 | Rebuild-from-feed | Documented as the recovery procedure ("the index remains a cache… losing it is an inconvenience, not data loss"); admin surface lists "index rebuild-from-feed" | **[ASSUMED]** implementation status — not checked off in ROADMAP; M0 determines whether `?x-swarm-restore=<root>` on a fresh gateway already covers it (see A2) |
 | Versioning caveat | "Bucket restore flattens version history" | Irrelevant if the BSL bucket has versioning off — which this design mandates (§5.4) |
@@ -52,7 +52,14 @@ These are the load-bearing facts, from s3warm's own reference docs. Do not re-de
 
 Implementation must not start until each item below has a written answer in `docs/GAPS.md` (M0 deliverable). Where the answer changes the design, both branches are pre-written here.
 
-**A1 — Do key-bearing SSE references appear in the commit chain?**
+**A1 — Do key-bearing SSE references appear in the commit chain?** — **[RESOLVED — see `docs/GAPS.md`]**
+
+**Answer: branch (c), plus branch (a)'s leak on the composite path.** Single-part SSE objects make the bucket's commit *fail* (`invalid entry size: 64, expected: 32` — mantaray manifests are single-width and the commit document is always a 32-byte reference), freezing the chain until the object is deleted. Multipart SSE objects commit fine and publish every part's 64-byte key-bearing reference, in cleartext, in a commit document readable from any Bee node. Evidence, reproduction, and remedy options are in `docs/GAPS.md`; the remedy is Peter's call.
+
+Two consequences bind the rest of this document. **`public_root` stays closed** — the root is a read capability today, so it lives in `sensitive` (§6.1). And **§5.4's SSE-S3 mandate currently contradicts the commit chain**, which is the one thing this project stands on; nothing downstream of the chain is safe for an SSE bucket until an upstream fix lands.
+
+The original three branches are kept below for the record. Branch (b)'s remedy is the pre-written answer to what was found.
+
 The commit document carries full index rows, and for an SSE object the index holds the 64-byte key-bearing reference. The chain's manifests are public (that is their point: `bzz://` browsability). Three possible findings:
 
 - *(a) SSE refs are in the commit document / manifest forks.* Then **any commit root of an SSE bucket is a read capability for the whole bucket**. Consequences: the recovery card's root field is secret material (the card design in §6 already assumes this); the feed must not be treated as public (its payload is the root); and s3warm should document this loudly. wintercluster works unchanged.
@@ -147,7 +154,7 @@ Also handled: `DeleteBackupRequest` — when Velero deletes a backup, the agent 
 
 ### 5.4 Deployment rules (documented, enforced by the Helm chart where possible)
 
-- One BSL bucket per cluster, **versioning off** (Velero doesn't need it; bucket restore flattens version history anyway), **SSE-S3 on** by default (resource tarballs contain every `Secret` in the cluster; Velero does not client-side-encrypt them), commit mode `sync` or default async — snapshot forces a commit either way.
+- One BSL bucket per cluster, **versioning off** (Velero doesn't need it; bucket restore flattens version history anyway), **SSE-S3 on** by default — **[BLOCKED: A1 found SSE-S3 and the commit chain mutually exclusive; see `docs/GAPS.md`. This rule and the chain cannot both hold until an upstream remedy ships.]** — (resource tarballs contain every `Secret` in the cluster; Velero does not client-side-encrypt them), commit mode `sync` or default async — snapshot forces a commit either way.
 - Gateway + its Bee node run **outside** the cluster being backed up. The in-cluster convenience deployment exists for demos only and prints a warning.
 - `-feed-key` mandatory for DR-grade deployments; without it, tier B/C depend on someone having saved a root, and `wintercluster find` is dead.
 - Kopia (Velero file-system backup / data mover) is the volume path; its repository password is user-held secret material, never stored by wintercluster.
