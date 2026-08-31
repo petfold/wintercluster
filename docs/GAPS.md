@@ -2,7 +2,7 @@
 
 Answers to DESIGN.md §3's A1–A6, from s3warm's code and a live stack rather than its docs. Each answer carries file/line evidence and, where the design branches, a demonstration.
 
-**Status: A1 and A2 answered; A1 confirmed on live hardware. A3 partially answered from code. A4–A6 open.**
+**Status: A1, A2, A3, A5, A6 answered — A1, A2 and A5 demonstrated on a live stack, A1 and A5 against real Swarm. A4 open (M1).**
 
 Environment for every live result below: s3warm at `05a45c8`, its `docker-compose.yml` dev stack (fakebee + SQLite index), Bee library `v2.8.1`, probes driven over plain S3 sigv4. Where fakebee's fidelity limits a conclusion, it is said so explicitly.
 
@@ -187,14 +187,65 @@ Until that lands the agent takes the owner address as configuration, as DESIGN �
 
 ## A4 — Velero/Kopia empirical compatibility — **open** (M1)
 
-## A5 — Retrieval requirements for tier C — **open**
+## A5 — Retrieval requirements for tier C
 
-## A6 — Snapshot lifetime vs Velero retention — **open**
+**Answer: a light node is sufficient. Verified end to end on real Swarm.**
+
+Ran s3warm against a live funded Bee **light** node (v2.8.2, batch `8e8f5f1b…`), wrote a 42-byte JSON object and a 2 MiB blob, forced a commit, then **killed the gateway and deleted its index** — leaving only a 64-hex root and the light node. From that position:
+
+1. Resolved the manifest and read `.s3warm/commit` over `GET /bytes`, using Bee's public `mantaray` package. No gateway, no credentials.
+2. Fetched each object by the `SwarmRef` in the commit document.
+3. Compared SHA-256 against the originals: **both byte-identical**, sizes matching the recorded `Size`.
+
+So tier C's read path needs nothing but a light node and a root. That is the single most load-bearing assumption in the design and it holds. It also means the tier-C client is small: a mantaray walk over `/bytes` plus a per-object GET — which is exactly what `internal/bee` will implement, and it is now demonstrated rather than assumed.
+
+**The throughput figure from this run is not usable and must not be quoted.** The measured 37 MB/s is the node serving chunks it had just uploaded, out of its own local store. It is a local-disk number wearing a network number's clothes. A real figure requires retrieval on a node that has never held the data; until then this project has no restore-throughput evidence at all.
+
+Consequently the erasure-coding half of A5 — the effect of `S3WARM_FETCH_STRATEGY` and `x-swarm-redundancy-strategy` on restore speed — is **not measured** and cannot be measured on a single warm node. It belongs to M6's benchmark harness, which needs a second, cold node in its topology. M6 should treat "the retrieving node must not be the uploading node" as a correctness requirement of the benchmark, not a nicety; the easiest way to get a wrong, flattering number here is to reuse one node.
+
+Still unconfirmed: that the chunks actually propagated to the wider network rather than merely living on the uploading node. A public-gateway fetch of the same references would settle it, and is the natural next step.
+
+## A6 — Snapshot lifetime vs Velero retention
+
+**Answer: the bucket's bound batch stamps the commit chain, falling back to the gateway default. The TTL is readable, but not where §10 assumed.**
+
+`CommitNow` picks the batch as `bucket.BatchID`, else the gateway default, and fails the commit if neither exists (`internal/manifest/committer.go`). That same batch is passed to `FeedPublisher.Publish`, so **the commit chain, the commit document, and the feed checkpoint all share one batch** — one TTL governs the entire recovery anchor, which is the simple case §10 hoped for.
+
+Confirmed live: the bucket had no bound batch, and every `objects[].BatchID` in the commit document fetched from Bee read `8e8f5f1b…`, the gateway default.
+
+**Correction to DESIGN §10.** It says the TTL margin is computed "from `x-swarm-batch-ttl` headers", implying the bucket. The header exists (`setBatchHeaders`, `internal/api/object.go`) but is only ever set on **object** responses — `PUT` and the GET/HEAD object path. `HeadBucket` emits `x-swarm-bucket-root` and `x-swarm-commit-seq` and no batch information at all. So the agent must HEAD a known object to learn the batch and its TTL; there is no bucket-level way to ask. Either the agent HEADs an arbitrary object from its own last backup, or `x-swarm-batch-ttl` joins the §12 HeadBucket additions alongside `x-swarm-feed-owner`. The latter is tidier and turns one round trip into zero extra ones.
+
+**Cross-link with A2, and it is the nastier finding.** A tier-B restore does not carry the bucket→batch binding. So after a restore the bucket falls back to the gateway default batch, and every subsequent commit and checkpoint is stamped by a batch with no relationship to the one `wintercluster_ttl_margin_seconds` was watching. The recovery anchor silently changes retention clocks at exactly the moment an operator is least able to notice. The agent must re-read the batch after any restore rather than caching it from the card, and the tier-B runbook must re-apply the batch binding explicitly.
+
+Pinning remains local-GC protection only, as designed — and per A2 it is untestable in the current harness.
 
 ---
 
+## Consolidated upstream list for s3warm
+
+M0's real output. Ordered by whether wintercluster can proceed without it.
+
+| # | Change | Size | Blocking? |
+|---|---|---|---|
+| 1 | **SSE in the commit chain** (A1). Descriptor indirection so SSE objects can be represented at all, plus recovery-recipient encryption of the reference-bearing fields so the chain stops publishing capabilities. Needs design discussion before code. | Medium | **Yes.** No SSE bucket has a commit chain today, and SSE is mandatory for Velero resource tarballs. |
+| 2 | **Fail loudly on unbuildable commits** (A1). A frozen chain is invisible from the S3 API and currently surfaces only as a log line. Metric at minimum. | Small | No, but it is what made this bug survivable in the first place |
+| 3 | **Re-pin on restore** (A2). `handleRestoreBucket` never pins the root it just restored. | Small (two lines) | No — the runbook can pin by hand |
+| 4 | **`x-swarm-feed-owner` / `x-swarm-feed-seq` on HeadBucket** (A3). The accessor exists; it needs wiring to the handler. | Small | No — configuration covers it |
+| 5 | **`x-swarm-batch-ttl` on HeadBucket** (A6). Otherwise the agent HEADs an arbitrary object to learn its own retention clock. | Small | No |
+| 6 | **Document what the commit chain publishes** (A1). Key names, sizes, ETags, batch IDs and user metadata are public for every bucket, not just SSE ones. s3warm's docs should say so as bluntly as they say it about deletion. | Small | No |
+| 7 | **`/pins` in fakebee** (A2). Pinning silently no-ops in the dev stack, so CI cannot test it. | Small | No — but M1's harness must not claim pin coverage until it exists |
+
+Items 3–6 are independent of the A1 remedy and could land first; item 1 wants a design conversation before any code. Item 7 is harness work and could equally live in wintercluster's CI as a live-Bee-only assertion.
+
 ## DESIGN.md corrections applied
 
-- §3 A1 — resolved; finding recorded, branch (c)+(a) noted, `public_root` default closed.
-- §5.4 — the SSE-S3 mandate now conflicts with the commit chain; flagged pending the A1 remedy.
-- §2 — the SSE row's forward reference to A1 updated to point here.
+- §2 — the SSE row's "lives only in the index" claim corrected; it is false for multipart objects.
+- §3 A1 — resolved; branch (c) plus branch (a)'s leak recorded, `public_root` default closed.
+- §5.4 — the SSE-S3 mandate marked BLOCKED pending the A1 remedy.
+- §10 — the TTL source corrected: `x-swarm-batch-ttl` is an object-response header, not a bucket one.
+
+## Reproduction notes
+
+The probes behind these results are session scratch files, not committed. Everything above is reproducible from the numbered steps in each section using any S3 client plus `curl` against Bee; the only non-obvious piece is the chain walk, which is ~40 lines against Bee's public `mantaray` package (`NewNodeRef(root).Lookup(".s3warm/commit")` over `GET /bytes`). Worth committing under `hack/recon/` when M0 closes, since M6's drill needs the same walk.
+
+The live-Swarm runs used a depth-17 batch bought for this purpose; it expires ~24 h after 2026-08-31T07:30Z. Re-running the live sections needs a fresh batch.

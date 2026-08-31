@@ -267,7 +267,7 @@ No performance numbers are asserted in this design; producing them honestly is a
 
 ## 10. Stamps and retention
 
-Rule: **batch TTL ≥ longest Velero backup TTL + safety margin**, continuously enforced, not set-and-forgotten. The stamp autopilot [VERIFIED] keeps batches topped up and diluted; wintercluster adds the Velero-aware check: `wintercluster_ttl_margin_seconds` compares the BSL bucket's batch TTL (from `x-swarm-batch-ttl` headers) against live Backup CR expirations, with a shipped alert rule. A backup that outlives its stamp is the one silent failure mode this system must never allow; it gets a metric, an alert, and a line in every card (`batch_ttl_at_capture`).
+Rule: **batch TTL ≥ longest Velero backup TTL + safety margin**, continuously enforced, not set-and-forgotten. The stamp autopilot [VERIFIED] keeps batches topped up and diluted; wintercluster adds the Velero-aware check: `wintercluster_ttl_margin_seconds` compares the BSL bucket's batch TTL (**[CORRECTED: `x-swarm-batch-ttl` is set on object responses only, never on HeadBucket — the agent must HEAD a known object, or the header joins the §12 HeadBucket additions. See `docs/GAPS.md` A6]**) against live Backup CR expirations, with a shipped alert rule. A backup that outlives its stamp is the one silent failure mode this system must never allow; it gets a metric, an alert, and a line in every card (`batch_ttl_at_capture`).
 
 Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIED]; network persistence is the batch's job (A6 confirms which batch). Retention of history = keeping the batch alive; deletion = letting it lapse (+ key destruction for SSE). Both directions documented.
 
