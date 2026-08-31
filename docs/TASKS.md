@@ -20,6 +20,27 @@ Deliverable: `docs/GAPS.md` containing:
 
 Acceptance: every `[ASSUMED]` marker in DESIGN.md is either upgraded to `[VERIFIED]` (with evidence link) or the design branch is chosen and the dead branches marked.
 
+**Status (2026-08-31): done except A4, which is M1 work by construction.** `docs/GAPS.md` answers A1, A2, A3, A5 and A6, with A1, A2 and A5 demonstrated on a live stack and A1 and A5 against real Swarm on a funded light node. A1 came back worse than any pre-written branch: SSE-S3 and the commit chain are mutually exclusive today — single-part SSE objects make the commit *fail* and freeze the chain, multipart SSE objects commit and publish their key-bearing references in cleartext, and a public gateway will decrypt one of those references over plain HTTPS for anyone who asks. DESIGN §5.4's SSE mandate is marked BLOCKED as a result, and `public_root` stays closed. A2's runbook is tested and shows restore carries no bucket configuration and never re-pins; A3 and A6 are answered from code; A5 confirms a light node serves the whole tier-C read path and that the data genuinely propagates. The serve-vs-materialize decision is made — read-only serve, because `store.Memory` already implements the whole interface. Output beyond the answers is a seven-item upstream list, of which one blocks this project.
+
+## M0.5 — Upstream remedy *(s3warm PRs; runs alongside M1)*
+
+M0's blocking findings. This milestone exists because wintercluster cannot honestly ship its recommended configuration until s3warm can commit an SSE bucket without publishing capabilities. It gates M2 onward; it does **not** gate M1, which can proceed on plaintext buckets.
+
+Sequenced by dependency:
+
+1. **Security response for the reference leak.** Not code: decide disclosure, since the exploit is a curl command against a public gateway and affects anyone using s3warm with SSE and multipart today. Peter's call as author; everything else here waits on nothing.
+2. **SSE in the commit chain.** Descriptor indirection (following the existing `composite/1` precedent) so SSE objects are representable at all, plus encryption of the reference-bearing fields to a per-bucket recovery recipient supplied at bucket creation. Needs an upstream design discussion **before** code — it changes the on-Swarm format and the bucket-creation API. Options and the argument for this one are in `docs/GAPS.md` A1.
+3. **Fail loudly on unbuildable commits.** A frozen chain is invisible from the S3 API and currently surfaces only as a warn-level log line, with the dirty flag already cleared so it is not retried. Metric at minimum.
+4. **Document what the chain publishes.** Key names, sizes, ETags, batch IDs and user metadata are public for *every* bucket, not only SSE ones. s3warm's docs should say so as bluntly as they say it about deletion.
+5. **`/pins` in fakebee.** Pinning silently no-ops in the dev stack, so neither snapshot pinning nor M2's re-pin fix can be tested in CI.
+
+Acceptance:
+- A bucket with default SSE on commits successfully, for single-part **and** multipart objects, and the resulting root round-trips through `?x-swarm-restore=`.
+- Given a commit root of an SSE bucket and no recovery identity, no object's bytes are retrievable — verified the same way the leak was found: pull the commit document from a bare node, take every reference in it, and fetch each one from a public gateway. Every fetch must fail.
+- With the recovery identity, every object *is* retrievable, and a tier-C restore of an SSE bucket produces byte-identical data.
+- A commit that cannot be built is visible without reading logs.
+- CI asserts a snapshot root is pinned.
+
 ## M1 — Velero-on-s3warm validation *(harness + report, minimal code)*
 
 Build the e2e harness: kind cluster + Velero (pinned version, stock AWS plugin) + s3warm compose stack (fakebee for CI; live Bee profile for local runs). Exercise:
@@ -32,17 +53,21 @@ Deliverable: `docs/COMPAT.md` — the BSL/plugin config that works (exact `s3Url
 
 Acceptance: scripted backup→restore→verify passes against the compose stack in CI; COMPAT.md documents a clean run against a live Bee node at least once, manually.
 
+Two constraints from M0. Until M0.5 lands, M1 runs against **plaintext buckets only** — an SSE bucket cannot commit, so any drill involving the chain is untestable in the mandated configuration; say so in COMPAT.md rather than quietly testing the wrong thing. And the harness must not claim pin coverage until fakebee grows `/pins` (M0.5 item 5).
+
 ## M2 — s3warm PRs: feed surfacing + tier-B hardening
 
-- `x-swarm-feed-owner` / `x-swarm-feed-seq` on HeadBucket (DESIGN §12).
+- `x-swarm-feed-owner` / `x-swarm-feed-seq` on HeadBucket (DESIGN §12). Add `x-swarm-batch-ttl` to the same handler while it is open: per GAPS A6 it exists only on object responses today, so the agent otherwise has to HEAD an arbitrary object to learn its own retention clock.
+- Re-pin on restore. `handleRestoreBucket` never pins the root it just restored, leaving it exposed to the new node's GC (GAPS A2). Two lines, and the acceptance drill below already exercises the path.
+- Carry the bucket→batch binding through restore, or make the runbook re-apply it explicitly: a restored bucket silently falls back to the gateway default batch and its retention clock changes unobserved (GAPS A6).
 - Fix or document everything the A2 runbook found missing in fresh-gateway `CreateBucket` + `?x-swarm-restore=<root>` (bucket config recreation, re-pinning).
 - s3warm docs: a "Disaster recovery" section owning the tier-B runbook.
 
 Acceptance: tier-B drill — populate bucket, destroy gateway + index containers, bring up fresh ones, restore by root, `velero backup get` shows the backups, restore succeeds — scripted and in s3warm's or wintercluster's CI.
 
-## M3 — Tier C path (s3warm PR or CLI, per M0 decision)
+## M3 — Tier C path (s3warm PR — read-only serve)
 
-Either `s3warm serve --read-only --root <ref>` (in-memory index from manifest walk; GET/HEAD/List only; refuses writes with a clear error) or `wintercluster materialize`. Must handle composite (multipart) descriptors and zero-byte objects (commit-document-only) correctly.
+**Branch resolved by M0: `s3warm serve --read-only --root <ref>`** (in-memory index from the commit document; GET/HEAD/List only; refuses writes with a clear error). `store.Memory` already implements the full index interface and `RestoreBucket` already loads commit-document rows, so this is mostly wiring plus a write-refusal surface. `wintercluster materialize` is descoped to a documented fallback for anyone who cannot run s3warm at all — it costs local disk equal to the bucket at the worst possible moment. Cost argument in `docs/GAPS.md`. Must handle composite (multipart) descriptors and zero-byte objects (commit-document-only) correctly.
 
 Acceptance: Velero restores a backup from the read-only endpoint with **no Postgres/SQLite anywhere** and no prior gateway state; works against a light Bee node (A5 evidence).
 

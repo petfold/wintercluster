@@ -241,6 +241,20 @@ Pinning remains local-GC protection only, as designed — and per A2 it is untes
 
 ---
 
+## Decision: `serve --read-only --root` vs `materialize` for v1
+
+**Decision: `s3warm serve --read-only --root <ref>`. `wintercluster materialize` is descoped to a fallback.**
+
+The cost argument turned on one thing: how much of the read-only mode already exists. Almost all of it.
+
+`internal/store/memory.go` implements the full 41-method `Store` interface, including `RestoreBucket(ctx, bucket, objects, root, seq)` — which is exactly "load a commit document's object rows into an index". So the mode is roughly: `NewMemory()`, `manifest.GetCommit(root)`, `CreateBucket` + `RestoreBucket`, then the existing server with writes refused. It reuses the commit walk, the index, and the entire read path unchanged. DESIGN §12 sized this "Medium"; on the evidence it is closer to small, and most of the risk is in the write-refusal surface rather than the serving.
+
+Against that, `materialize` costs local disk equal to the bucket — including all Kopia volume data — at precisely the moment the operator is rebuilding from nothing and least likely to have spare capacity. It also moves every byte twice: once to disk, then again to Velero. Its only real advantage is needing no s3warm change, and A5 showed the read path is a mantaray walk plus per-object GETs, so that advantage buys little.
+
+Tier C's premise is "cannot or will not run a gateway **with a writable index**" (DESIGN §4). A stateless read-only serve satisfies it: no Postgres, no SQLite, no disk. This also matches DESIGN §7.4, which already names it the tier-C path.
+
+This resolves M3's branch. `materialize` stays documented as the escape hatch for anyone who cannot run s3warm at all, and is not v1 scope.
+
 ## Consolidated upstream list for s3warm
 
 M0's real output. Ordered by whether wintercluster can proceed without it.
