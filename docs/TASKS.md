@@ -1,9 +1,9 @@
-# rootcellar — implementation plan
+# wintercluster — implementation plan
 
 Rules of engagement:
 - Milestones are ordered; **M0 gates everything**. No implementation code before `docs/GAPS.md` exists and DESIGN.md's `[ASSUMED]` items are resolved.
 - Every milestone ends with: tests green in CI, docs updated, a one-paragraph status note appended to this file under its milestone.
-- s3warm changes are PRs against `petfold/s3warm`, matching that repo's conventions (its DESIGN.md is the style reference). rootcellar code lives in its own repo.
+- s3warm changes are PRs against `petfold/s3warm`, matching that repo's conventions (its DESIGN.md is the style reference). wintercluster code lives in its own repo.
 - When reality contradicts DESIGN.md, reality wins: update DESIGN.md in the same change, marking the correction.
 
 ---
@@ -38,17 +38,17 @@ Acceptance: scripted backup→restore→verify passes against the compose stack 
 - Fix or document everything the A2 runbook found missing in fresh-gateway `CreateBucket` + `?x-swarm-restore=<root>` (bucket config recreation, re-pinning).
 - s3warm docs: a "Disaster recovery" section owning the tier-B runbook.
 
-Acceptance: tier-B drill — populate bucket, destroy gateway + index containers, bring up fresh ones, restore by root, `velero backup get` shows the backups, restore succeeds — scripted and in s3warm's or rootcellar's CI.
+Acceptance: tier-B drill — populate bucket, destroy gateway + index containers, bring up fresh ones, restore by root, `velero backup get` shows the backups, restore succeeds — scripted and in s3warm's or wintercluster's CI.
 
 ## M3 — Tier C path (s3warm PR or CLI, per M0 decision)
 
-Either `s3warm serve --read-only --root <ref>` (in-memory index from manifest walk; GET/HEAD/List only; refuses writes with a clear error) or `rootcellar materialize`. Must handle composite (multipart) descriptors and zero-byte objects (commit-document-only) correctly.
+Either `s3warm serve --read-only --root <ref>` (in-memory index from manifest walk; GET/HEAD/List only; refuses writes with a clear error) or `wintercluster materialize`. Must handle composite (multipart) descriptors and zero-byte objects (commit-document-only) correctly.
 
 Acceptance: Velero restores a backup from the read-only endpoint with **no Postgres/SQLite anywhere** and no prior gateway state; works against a light Bee node (A5 evidence).
 
-## M4 — rootcellar-agent MVP
+## M4 — wintercluster-agent MVP
 
-Controller (Go, controller-runtime): watch Backup CRs → terminal phase → snapshot → assemble card (unsigned/unencrypted at this milestone) → sinks: Backup CR annotation, JSONL file, stdout. Prometheus metrics incl. `rootcellar_ttl_margin_seconds` + shipped alert rule. Helm chart with the deployment rules from DESIGN §5.4 (warnings included).
+Controller (Go, controller-runtime): watch Backup CRs → terminal phase → snapshot → assemble card (unsigned/unencrypted at this milestone) → sinks: Backup CR annotation, JSONL file, stdout. Prometheus metrics incl. `wintercluster_ttl_margin_seconds` + shipped alert rule. Helm chart with the deployment rules from DESIGN §5.4 (warnings included).
 
 Acceptance: in the M1 harness, every completed backup yields a card within 60 s; `velero backup describe` shows the annotation; killing the agent mid-backup loses nothing (reconciles on restart); metrics scrape clean.
 
@@ -56,7 +56,7 @@ Acceptance: in the M1 harness, every completed backup yields a card within 60 s;
 
 - Canonical JSON + EIP-191 signing; age encryption of `sensitive` (passphrase + optional X25519 recipients); A1-branch handling of `public_root`.
 - Escrow-feed sink; webhook sink.
-- `rootcellar card verify` (signature, schema, feed cross-check, optional Bee existence probe), `card render` (text + QR + one-page printable), `rootcellar find`.
+- `wintercluster card verify` (signature, schema, feed cross-check, optional Bee existence probe), `card render` (text + QR + one-page printable), `wintercluster find`.
 
 Acceptance: verify catches — a tampered card, a wrong signer, a card whose root is absent from the feed's chain; render output survives a print-scan-QR-decode round trip.
 

@@ -1,8 +1,8 @@
-# rootcellar — design v0.1
+# wintercluster — design v0.1
 
-*(Name provisional — lowercase, functional, dry: a root cellar is where you store roots to survive the winter. Rename at will.)*
+*(Name settled: lowercase, one word. A honeybee colony survives winter by forming a **winter cluster** — the bees ball around the queen and live off the stores they sealed away in autumn. This is a backup tool for Kubernetes clusters, so the pun is free and the metaphor is exact: seal the stores while it is warm, survive on them when it is not.)*
 
-**One sentence:** Velero backs up Kubernetes to Swarm through s3warm; rootcellar makes every backup recoverable from the bare Swarm network — no cloud account, no gateway, no metadata index, no surviving cluster — by capturing each backup's commit root into a small, signed, escrowable **recovery card**.
+**One sentence:** Velero backs up Kubernetes to Swarm through s3warm; wintercluster makes every backup recoverable from the bare Swarm network — no cloud account, no gateway, no metadata index, no surviving cluster — by capturing each backup's commit root into a small, signed, escrowable **recovery card**.
 
 **The pitch in one line:** a cluster's entire disaster-recovery position reduces to one commit root, one feed coordinate pair, and two user-held secrets (a recovery passphrase and the Kopia repository password).
 
@@ -13,15 +13,15 @@
 ## 1. Scope
 
 **In scope (v1):**
-- `rootcellar-agent` — in-cluster controller: watches Velero `Backup` CRs, snapshots the BSL bucket at backup completion, produces and escrows recovery cards.
-- `rootcellar` CLI — verifies cards, renders them for humans (text + QR), and orchestrates tier-B/C restores.
+- `wintercluster-agent` — in-cluster controller: watches Velero `Backup` CRs, snapshots the BSL bucket at backup completion, produces and escrows recovery cards.
+- `wintercluster` CLI — verifies cards, renders them for humans (text + QR), and orchestrates tier-B/C restores.
 - Small additions to s3warm (as PRs to that repo): feed-owner surfacing, a stateless read-only serving mode from a bare root, hardening of the rebuild-from-root path. Each is listed in §12.
 - The recovery-card format (schema, signing, encryption, sinks).
 - Demo (`demos/06-kubernetes-dr.sh` in s3warm), an end-to-end restore drill in CI, and a benchmark harness.
 
 **Out of scope (v1):**
 - A native Velero ObjectStore plugin (the stock AWS plugin against s3warm is the whole point).
-- ACT-protected buckets as BSL targets — **[VERIFIED]** the commit chain is off for ACT buckets (it would leak key names and structure), and the chain is what rootcellar stands on. BSL buckets use SSE-S3.
+- ACT-protected buckets as BSL targets — **[VERIFIED]** the commit chain is off for ACT buckets (it would leak key names and structure), and the chain is what wintercluster stands on. BSL buckets use SSE-S3.
 - Kasten/other backup tools, multi-cluster fleet management, any UI.
 - Stamp-underwriting integration (insured retention) — a natural v2; noted in §13.
 
@@ -55,7 +55,7 @@ Implementation must not start until each item below has a written answer in `doc
 **A1 — Do key-bearing SSE references appear in the commit chain?**
 The commit document carries full index rows, and for an SSE object the index holds the 64-byte key-bearing reference. The chain's manifests are public (that is their point: `bzz://` browsability). Three possible findings:
 
-- *(a) SSE refs are in the commit document / manifest forks.* Then **any commit root of an SSE bucket is a read capability for the whole bucket**. Consequences: the recovery card's root field is secret material (the card design in §6 already assumes this); the feed must not be treated as public (its payload is the root); and s3warm should document this loudly. rootcellar works unchanged.
+- *(a) SSE refs are in the commit document / manifest forks.* Then **any commit root of an SSE bucket is a read capability for the whole bucket**. Consequences: the recovery card's root field is secret material (the card design in §6 already assumes this); the feed must not be treated as public (its payload is the root); and s3warm should document this loudly. wintercluster works unchanged.
 - *(b) SSE objects are excluded or opaque in the chain.* Then the chain alone cannot restore SSE objects, and tier-B/C restores are broken for exactly the objects that matter (Velero resource tarballs containing cluster `Secret`s). Remedy, as an s3warm proposal: include SSE refs in the commit document but encrypt those entries (or the whole `objects` array) under a per-bucket **recovery public key** (age recipient) supplied at bucket creation; the matching identity lives only in the recovery card's encrypted section. This keeps the chain public *and* restorable-by-keyholder.
 - *(c) SSE + commit chain currently don't combine at all* (like ACT). Same remedy as (b), or v1 falls back to gateway-side at-rest encryption semantics being provided by Kopia only (see §11 — acceptable for volume data, not for resource tarballs).
 
@@ -82,9 +82,9 @@ Snapshot lifetime is bounded by the postage batch that stamped the commit; pinni
 
 | Tier | What is lost | What survives | Restore path |
 |---|---|---|---|
-| **A** | Nothing (or just the cluster) | s3warm + index + Bee node | Plain `velero restore` against the BSL. rootcellar not involved |
+| **A** | Nothing (or just the cluster) | s3warm + index + Bee node | Plain `velero restore` against the BSL. wintercluster not involved |
 | **B** | Gateway host: s3warm process, Postgres/SQLite index, local Bee node and its pins | The Swarm network; the recovery card (or just the feed coordinates) | Fresh s3warm + any Bee node → `CreateBucket` → `POST ?x-swarm-restore=<root>` (root from card, or resolved from the feed) → re-mint S3 credentials → `velero restore` |
-| **C** | Everything above **plus** no s3warm anywhere (can't or won't run a gateway with a writable index) | The Swarm network + the recovery card + user-held secrets | `s3warm serve --read-only --root <root>` (stateless, no index — §12) or `rootcellar materialize --root <root> --out dir/` → point Velero at the read-only endpoint → `velero restore` |
+| **C** | Everything above **plus** no s3warm anywhere (can't or won't run a gateway with a writable index) | The Swarm network + the recovery card + user-held secrets | `s3warm serve --read-only --root <root>` (stateless, no index — §12) or `wintercluster materialize --root <root> --out dir/` → point Velero at the read-only endpoint → `velero restore` |
 
 Tier C is the demo and the reason to build this: *"wreck the cluster and the gateway; restore the workload from a hash, a passphrase, and any Bee node."*
 
@@ -98,7 +98,7 @@ Tier C is the demo and the reason to build this: *"wreck the cluster and the gat
 | A recovery card but no passphrase | Read the public fields (bucket name, seq, timestamps; the root **only if** A1 lands on branch (b)/(c) where the root is not a capability — under branch (a) the root itself lives in the encrypted section) | Decrypt the sensitive section; decrypt Kopia blobs (repo password is separate) |
 | Everything except the user-held secrets | — | Read SSE-protected resource tarballs or Kopia volume data. The passphrase + Kopia password are the last line, held by humans |
 
-**Ransomware framing (the sales pitch, kept honest):** deleting or encrypting the backups requires deleting chunks from Swarm, which nobody — including the owner — can do before stamp expiry. The attacker's best move is stopping stamp payments, which the autopilot resists and which still leaves a TTL-long recovery window. The mutable index is wreckable, but it is a cache; rootcellar's job is making sure the immutable roots are always findable afterwards.
+**Ransomware framing (the sales pitch, kept honest):** deleting or encrypting the backups requires deleting chunks from Swarm, which nobody — including the owner — can do before stamp expiry. The attacker's best move is stopping stamp payments, which the autopilot resists and which still leaves a TTL-long recovery window. The mutable index is wreckable, but it is a cache; wintercluster's job is making sure the immutable roots are always findable afterwards.
 
 ---
 
@@ -110,20 +110,20 @@ Tier C is the demo and the reason to build this: *"wreck the cluster and the gat
 │ Velero server ── Backup CRs  │ S3   │  s3warm ── index (PG)    │  Bee   ┌────────┐
 │ node-agent (Kopia FSB)  ─────┼─────▶│    │  commit chain ──────┼───────▶│network │
 │                              │      │    │  stamp autopilot    │        │        │
-│ rootcellar-agent             │      │    └ feed checkpoints ───┼───────▶│ feeds  │
+│ wintercluster-agent             │      │    └ feed checkpoints ───┼───────▶│ feeds  │
 │   watch Backup CRs           │      └──────────▲───────────────┘        └────▲───┘
 │   PUT ?x-swarm-snapshot ─────┼─ S3 + x-swarm ──┘                             │
 │   write recovery card ───────┼── sinks: Backup CR annotation, file,          │
 │                              │          webhook, escrow feed ────────────────┘
 └──────────────────────────────┘
- restore tier C:  rootcellar CLI + any Bee node + card  →  read-only serve / materialize  →  velero restore
+ restore tier C:  wintercluster CLI + any Bee node + card  →  read-only serve / materialize  →  velero restore
 ```
 
 ### 5.1 Interaction contract
 
-The agent and CLI talk to s3warm **only over HTTP** (S3 API + `x-swarm-*` extensions) and to Bee only over its HTTP API. No Go-level imports of s3warm (`internal/` is unimportable by design); no shared database access. This keeps rootcellar a separate repo with a stable dependency surface, and keeps every capability it relies on documented in s3warm's REFERENCE.md — if rootcellar needs something undocumented, the fix is an s3warm PR (§12), not a private hook.
+The agent and CLI talk to s3warm **only over HTTP** (S3 API + `x-swarm-*` extensions) and to Bee only over its HTTP API. No Go-level imports of s3warm (`internal/` is unimportable by design); no shared database access. This keeps wintercluster a separate repo with a stable dependency surface, and keeps every capability it relies on documented in s3warm's REFERENCE.md — if wintercluster needs something undocumented, the fix is an s3warm PR (§12), not a private hook.
 
-### 5.2 rootcellar-agent (in-cluster)
+### 5.2 wintercluster-agent (in-cluster)
 
 A single-replica Deployment in the `velero` namespace. Reconciliation loop:
 
@@ -131,26 +131,26 @@ A single-replica Deployment in the `velero` namespace. Reconciliation loop:
 2. **Barrier + capture:** `PUT /{bucket}?x-swarm-snapshot=velero-{backupName}` → `{root, seq, createdAt}`. Label charset (`[A-Za-z0-9._-]{1,64}`) accommodates Velero backup names; enforce/truncate with a hash suffix if needed.
 3. **Assemble the recovery card** (§6): bucket config snapshot (from `HeadBucket`, `GetBucketEncryption`, batch headers), feed coordinates, snapshot result, Velero context, TTL margin.
 4. **Sign, encrypt, escrow** to every configured sink (§6.3).
-5. **Verify (optional, on by default, budgeted):** fetch the commit document at `root` from the Bee node, check that a sample (or all) of the keys under `backups/{backupName}/` and `kopia/` prefixes listed by S3 also appear in the commit document with matching ETags. Emit `rootcellar_verify_failures_total` on mismatch.
-6. **Metrics** (Prometheus): `rootcellar_cards_written_total{sink}`, `rootcellar_last_card_age_seconds`, `rootcellar_snapshot_failures_total`, `rootcellar_ttl_margin_seconds` (batch TTL minus the longest live Velero backup TTL — the alert that prevents the silent-expiry failure mode), `rootcellar_verify_failures_total`.
+5. **Verify (optional, on by default, budgeted):** fetch the commit document at `root` from the Bee node, check that a sample (or all) of the keys under `backups/{backupName}/` and `kopia/` prefixes listed by S3 also appear in the commit document with matching ETags. Emit `wintercluster_verify_failures_total` on mismatch.
+6. **Metrics** (Prometheus): `wintercluster_cards_written_total{sink}`, `wintercluster_last_card_age_seconds`, `wintercluster_snapshot_failures_total`, `wintercluster_ttl_margin_seconds` (batch TTL minus the longest live Velero backup TTL — the alert that prevents the silent-expiry failure mode), `wintercluster_verify_failures_total`.
 
 Failure stance: card production must never fail a backup (it runs after the fact) but must never fail *silently* — every sink write is retried with backoff, surfaced in metrics, and recorded as an Event on the Backup CR.
 
 Also handled: `DeleteBackupRequest` — when Velero deletes a backup, the agent annotates (not deletes) the corresponding card records as superseded; the immutable chain retains the data until stamp expiry regardless, and the docs say so plainly (compliance posture: deletion on Swarm is stamp expiry plus, for SSE, key destruction — crypto-shredding).
 
-### 5.3 rootcellar CLI
+### 5.3 wintercluster CLI
 
-- `rootcellar card verify <card>` — signature, schema, feed cross-check (resolve feed, confirm the card's root appears in the chain), optional Bee-side existence probe of the root.
-- `rootcellar card render <card>` — human-readable sheet + QR (the "print this and put it in the safe" artifact).
-- `rootcellar restore --card <card> [--tier b|c]` — orchestrates the runbooks in §7: talks to a fresh s3warm (tier B) or drives the read-only path (tier C), then prints the exact `velero` commands. It orchestrates; it does not reimplement Velero restore.
-- `rootcellar find --owner <addr> --bucket <name>` — no card at all: derive the topic, resolve the feed on any Bee node, walk parent links, list restorable roots with timestamps. The floor of recoverability: feed coordinates alone.
+- `wintercluster card verify <card>` — signature, schema, feed cross-check (resolve feed, confirm the card's root appears in the chain), optional Bee-side existence probe of the root.
+- `wintercluster card render <card>` — human-readable sheet + QR (the "print this and put it in the safe" artifact).
+- `wintercluster restore --card <card> [--tier b|c]` — orchestrates the runbooks in §7: talks to a fresh s3warm (tier B) or drives the read-only path (tier C), then prints the exact `velero` commands. It orchestrates; it does not reimplement Velero restore.
+- `wintercluster find --owner <addr> --bucket <name>` — no card at all: derive the topic, resolve the feed on any Bee node, walk parent links, list restorable roots with timestamps. The floor of recoverability: feed coordinates alone.
 
 ### 5.4 Deployment rules (documented, enforced by the Helm chart where possible)
 
 - One BSL bucket per cluster, **versioning off** (Velero doesn't need it; bucket restore flattens version history anyway), **SSE-S3 on** by default (resource tarballs contain every `Secret` in the cluster; Velero does not client-side-encrypt them), commit mode `sync` or default async — snapshot forces a commit either way.
 - Gateway + its Bee node run **outside** the cluster being backed up. The in-cluster convenience deployment exists for demos only and prints a warning.
-- `-feed-key` mandatory for DR-grade deployments; without it, tier B/C depend on someone having saved a root, and `rootcellar find` is dead.
-- Kopia (Velero file-system backup / data mover) is the volume path; its repository password is user-held secret material, never stored by rootcellar.
+- `-feed-key` mandatory for DR-grade deployments; without it, tier B/C depend on someone having saved a root, and `wintercluster find` is dead.
+- Kopia (Velero file-system backup / data mover) is the volume path; its repository password is user-held secret material, never stored by wintercluster.
 
 ---
 
@@ -189,7 +189,7 @@ Also handled: `DeleteBackupRequest` — when Velero deletes a backup, the agent 
 | Backup CR annotation | Tier-A convenience: `velero backup describe` shows the card | Size-capped; store the card minus `sensitive` if over limit, with a pointer |
 | Local file / mounted volume | Simple durable copy | Append-only JSONL |
 | Webhook | Ship to a password manager, ticketing, or printer pipeline | At-least-once, retried |
-| Escrow feed on Swarm | `owner = agent key, topic = keccak256("rootcellar/1/" + cluster)`; payload = the encrypted card | Discoverability of the *latest* card from the bare network. Circular by design (Swarm storing its own recovery data) — which is why the printed/off-site copy is the canonical one and the docs say so |
+| Escrow feed on Swarm | `owner = agent key, topic = keccak256("wintercluster/1/" + cluster)`; payload = the encrypted card | Discoverability of the *latest* card from the bare network. Circular by design (Swarm storing its own recovery data) — which is why the printed/off-site copy is the canonical one and the docs say so |
 | stdout | Log-scraping fallback | Card minus `sensitive` |
 
 ---
@@ -210,19 +210,19 @@ agent:  observe terminal phase
 
 ### 7.2 Tier A
 
-`velero restore create --from-backup {name}`. rootcellar uninvolved. (Listed so runbooks always start from the cheapest tier.)
+`velero restore create --from-backup {name}`. wintercluster uninvolved. (Listed so runbooks always start from the cheapest tier.)
 
 ### 7.3 Tier B — gateway and index lost
 
 1. Provision any Bee node (light node acceptable per A5) and a fresh s3warm with a new empty index; mint fresh S3 credentials.
-2. Recover the root: from the card's `public_root`/`sensitive`; or, with no card, `rootcellar find --owner … --bucket …` → resolve `GET /feeds/{owner}/{topic}?type=sequence` → latest root → walk `parent` links to choose an earlier point if needed.
+2. Recover the root: from the card's `public_root`/`sensitive`; or, with no card, `wintercluster find --owner … --bucket …` → resolve `GET /feeds/{owner}/{topic}?type=sequence` → latest root → walk `parent` links to choose an earlier point if needed.
 3. `CreateBucket` with the config from the card (SSE default, batch binding), then `POST /{bucket}?x-swarm-restore=<root>` → index rebuilt for that bucket (A2 runbook governs the details).
 4. Point Velero's BSL at the fresh gateway (`s3Url`, `s3ForcePathStyle: true`, any region label); `velero backup get` syncs; `velero restore create`.
 
 ### 7.4 Tier C — no writable gateway at all
 
 1. Decrypt the card's `sensitive` with the recovery passphrase → root (+ key material per A1 outcome).
-2. `s3warm serve --read-only --root <root>` against any Bee node (§12): stateless, in-memory index built by walking the manifest and commit document; serves GET/HEAD/List only. (Fallback if that feature is descoped: `rootcellar materialize --root <root> --out ./bucket/` then serve with anything, at the cost of local disk = bucket size.)
+2. `s3warm serve --read-only --root <root>` against any Bee node (§12): stateless, in-memory index built by walking the manifest and commit document; serves GET/HEAD/List only. (Fallback if that feature is descoped: `wintercluster materialize --root <root> --out ./bucket/` then serve with anything, at the cost of local disk = bucket size.)
 3. Point Velero's BSL at the read-only endpoint; restore. Kopia decrypts volume data with the user-held repository password.
 
 The flagship drill (M6) executes 7.4 on a machine that has never seen the original cluster, gateway, or index, and asserts byte-identical workload data.
@@ -234,7 +234,7 @@ The flagship drill (M6) executes 7.4 on a machine that has never seen the origin
 - **The snapshot is a consistent cut.** All writes for a backup precede its terminal phase; the snapshot forces a commit after that; therefore the commit document is a superset of the backup's object set. Concurrent unrelated writes (a second schedule, Kopia maintenance) may also be in the cut — harmless, the card belongs to the bucket state, and Velero reads by key.
 - **Kopia maintenance vs old roots.** Maintenance deletes unreferenced blobs; a root captured at backup *N* still contains every blob referenced *at that time*, so restoring the bucket to root *N* yields an internally consistent Kopia repository as of *N*. Rolling a bucket back resurrects since-deleted objects; Velero re-syncs and shows old backups again; Kopia GCs the extras. Documented, not fought.
 - **Multi-writer.** Velero server + node-agents write concurrently through one gateway (or several over the shared Postgres index — supported upstream). The chain serializes at commit level; nothing here assumes single-writer.
-- **Checkpoint lag.** The feed may trail the head (policy-dependent; currently every-commit upstream). The card carries the exact root, so lag only affects the card-less `rootcellar find` floor — surface the lag via §12's headers and a metric.
+- **Checkpoint lag.** The feed may trail the head (policy-dependent; currently every-commit upstream). The card carries the exact root, so lag only affects the card-less `wintercluster find` floor — surface the lag via §12's headers and a metric.
 
 ---
 
@@ -260,7 +260,7 @@ No performance numbers are asserted in this design; producing them honestly is a
 
 ## 10. Stamps and retention
 
-Rule: **batch TTL ≥ longest Velero backup TTL + safety margin**, continuously enforced, not set-and-forgotten. The stamp autopilot [VERIFIED] keeps batches topped up and diluted; rootcellar adds the Velero-aware check: `rootcellar_ttl_margin_seconds` compares the BSL bucket's batch TTL (from `x-swarm-batch-ttl` headers) against live Backup CR expirations, with a shipped alert rule. A backup that outlives its stamp is the one silent failure mode this system must never allow; it gets a metric, an alert, and a line in every card (`batch_ttl_at_capture`).
+Rule: **batch TTL ≥ longest Velero backup TTL + safety margin**, continuously enforced, not set-and-forgotten. The stamp autopilot [VERIFIED] keeps batches topped up and diluted; wintercluster adds the Velero-aware check: `wintercluster_ttl_margin_seconds` compares the BSL bucket's batch TTL (from `x-swarm-batch-ttl` headers) against live Backup CR expirations, with a shipped alert rule. A backup that outlives its stamp is the one silent failure mode this system must never allow; it gets a metric, an alert, and a line in every card (`batch_ttl_at_capture`).
 
 Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIED]; network persistence is the batch's job (A6 confirms which batch). Retention of history = keeping the batch alive; deletion = letting it lapse (+ key destruction for SSE). Both directions documented.
 
@@ -269,7 +269,7 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 ## 11. Security notes
 
 - **The card is secret-by-default.** Even if A1 concludes roots are not capabilities, cards name buckets, clusters, and infrastructure; and under branch (a) the root *is* the bucket. Encrypted section always present; sinks documented with that assumption.
-- **Custody:** recovery passphrase and Kopia repository password are human-held, stored outside all systems this design can lose. The printed card + password manager is the recommended pairing. rootcellar never persists either.
+- **Custody:** recovery passphrase and Kopia repository password are human-held, stored outside all systems this design can lose. The printed card + password manager is the recommended pairing. wintercluster never persists either.
 - **Resource tarballs:** Velero does not client-side-encrypt them and they contain every cluster `Secret` — hence SSE-S3 mandatory on the BSL bucket, and hence A1 is the gating question for tier-C completeness.
 - **Agent key:** rotate by publishing the new address in chart values; `card verify` accepts a configured set of valid signers with validity windows.
 - **Fraudulent feed updates** (gateway-key theft): cards pin exact roots and seq numbers; `verify` cross-checks card ↔ feed ↔ chain and flags divergence rather than trusting any single source.
@@ -291,11 +291,15 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 ## 13. Open questions (beyond the M0 gates)
 
 1. Should the escrow feed carry every card or only a rolling latest-N? (Feed updates are stamped SOCs; cost vs history.)
-2. Card format registration: is a media type + `.rootcellar.json` extension enough, or align with an existing DR-manifest convention?
+2. Card format registration: is a media type + `.wintercluster.json` extension enough, or align with an existing DR-manifest convention?
 3. Multi-BSL clusters (rare): one agent watching all BSLs, cards carry the BSL name — any reason not to?
 4. v2: stamp-underwriting integration — an underwritten batch behind the BSL bucket turns "backups persist" from an ops promise into an on-chain guarantee; the card would carry the policy reference. Design separately once v1 drills pass.
 5. v2: PSS/GSOC notification of new checkpoints to off-site listeners (upstream has this as open research).
 
 ## 14. Terminology
 
-Terms follow the swarm skill / s3warm docs: *reference*, *chunk*, *postage stamp/batch*, *feed*, *manifest/Mantaray*, *commit chain*, *checkpoint*, *ACT*. Where this document says "root" it means a bucket commit root: the 32-byte reference of a commit's Mantaray manifest.
+**"Cluster" always means the Kubernetes cluster** — in this document, in code, in metric help strings, in user-facing output. The project's name is a pun on the bee formation, but the word is never reused for it: write `wintercluster` when you mean the project. The card schema's `cluster` field is the Kubernetes one.
+
+The recovery card is called the **recovery card** (or just *the card*), everywhere — schema, CLI, metrics, prose. It is the printable, signed artifact of §6; no alternative name for it appears in docs or code.
+
+Otherwise, terms follow the swarm skill / s3warm docs: *reference*, *chunk*, *postage stamp/batch*, *feed*, *manifest/Mantaray*, *commit chain*, *checkpoint*, *ACT*. Where this document says "root" it means a bucket commit root: the 32-byte reference of a commit's Mantaray manifest.
