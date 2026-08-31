@@ -34,6 +34,26 @@ Sequenced by dependency:
 4. **Document what the chain publishes.** Key names, sizes, ETags, batch IDs and user metadata are public for *every* bucket, not only SSE ones. s3warm's docs should say so as bluntly as they say it about deletion.
 5. **`/pins` in fakebee.** Pinning silently no-ops in the dev stack, so neither snapshot pinning nor M2's re-pin fix can be tested in CI.
 
+**Status (2026-08-31): item 2 done and open as [s3warm#1](https://github.com/petfold/s3warm/pull/1); items 1, 3, 4 done; item 5 outstanding.**
+
+The SSE remedy is implemented on `sse-commit-chain` in s3warm and meets every acceptance criterion below, verified against a live Bee light node and the public gateway rather than only in tests. Sealing keys off the **reference**, not the object's `Encrypted` flag: the first implementation used the flag and did not close the leak, because a whole-object `UploadPartCopy` reuses the source's reference while the destination sets the flag. Two independent adversarial reviews were run; the first found four blockers including that hole, the second confirmed the reference-based sealing holds. Item 3 (loud failure) shipped as `s3warm_commit_failures_total`; item 4 (documenting what the chain publishes for every bucket) is in s3warm's REFERENCE.md. Item 5 (`/pins` in fakebee) is untouched, so **M1 still cannot assert pin coverage**.
+
+Two consequences for this project, both from the same PR:
+
+- The card's `bucket` section must now carry the **recovery recipient**, and the card's `sensitive` section the matching **identity** — without it a tier-B or tier-C restore of an SSE bucket cannot rebuild an index at all. This is a schema addition to DESIGN §6.1 and a new user-held secret alongside the passphrase and the Kopia password. It also means the identity is a third thing whose loss is unrecoverable; §11's custody guidance has to say so.
+- Commit documents are now **version 2**. `wintercluster find` and any chain walking must read `SealedRef`, refuse versions they do not understand, and treat a v1 `parent` link as still valid.
+
+Deferred upstream, tracked in the PR's follow-ups and worth watching because two touch this project directly:
+
+| # | Item | Why it matters here |
+|---|---|---|
+| 1 | Seal once at object-write time instead of per commit | age is randomised per call, so a commit document is rewritten every commit even when the bucket has not changed. DESIGN §9's structural-sharing argument is weaker for encrypted buckets until this lands, and §9 is where the incremental-cost claim comes from |
+| 2 | Rolling-upgrade hazard: a pre-v2 gateway silently builds empty references from a v2 document | A tier-B restore against an old binary would appear to succeed and produce nothing. The drill must pin the gateway version |
+| 3 | Record which recipient a root was sealed to | With rotation, a card names one identity and an older root may need another. `card verify` should cross-check, which needs the chain to say |
+| 4 | `sse/1` descriptor is write-only | M3's read-only serve mode is the natural consumer |
+| 5 | Migration loop runs outside the advisory lock | Only bites the next migration; noted so it is not rediscovered |
+| 6 | `/pins` in fakebee | M0.5 item 5, still open; gates honest pin coverage in M1 |
+
 Acceptance:
 - A bucket with default SSE on commits successfully, for single-part **and** multipart objects, and the resulting root round-trips through `?x-swarm-restore=`.
 - Given a commit root of an SSE bucket and no recovery identity, no object's bytes are retrievable — verified the same way the leak was found: pull the commit document from a bare node, take every reference in it, and fetch each one from a public gateway. Every fetch must fail.

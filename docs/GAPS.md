@@ -99,6 +99,8 @@ s3warm already has the shape for a fix. `composite/1` proves the pattern: when a
 
 (ii) is the only option that leaves wintercluster viable with SSE mandated. It needs upstream design discussion before code.
 
+**Outcome (2026-08-31): (ii) implemented, [s3warm#1](https://github.com/petfold/s3warm/pull/1).** An `sse/1` descriptor holds the reference sealed to a per-bucket age recipient set at CreateBucket or later; the commit document carries `SealedRef`; the identity is supplied per restore request and never stored. Sealing keys off the reference rather than the object's `Encrypted` flag — a whole-object `UploadPartCopy` reuses the source's reference while the destination sets the flag, so a flag-based implementation left the leak open. Verified live: the commit document of an SSE bucket contains no 128-hex string, every reference in it fetched from the public gateway yields no object data, and a 10 MiB multipart object still restores byte-identical with the identity. `public_root` therefore **stays closed** for now: until s3warm#1 ships and a bucket is known to have been written by it, treat any root as a capability.
+
 Independent of the choice, two smaller upstream items fall out:
 
 - Fail loudly. A commit that cannot be built should surface beyond a log line — a metric at minimum, since a frozen chain is invisible from the S3 API.
