@@ -15,7 +15,7 @@ Kopia volume restore. Two limitations found, neither in s3warm.
 | Velero | `v1.18.2` |
 | `velero-plugin-for-aws` | `v1.14.2` |
 | Kubernetes (kind) | `v1.37.0`, kind `v0.33.0` |
-| Bee | `fakebee` from the s3warm tree (CI); live light node `v2.8.2` for M0 work |
+| Bee | `fakebee` from the s3warm tree (CI); live **light** node `v2.8.2` on Gnosis for the live profile |
 
 All pinned in `hack/e2e/versions.env`. Run with `hack/e2e/up.sh` then
 `hack/e2e/run-all.sh`.
@@ -115,7 +115,43 @@ claim to. Tracked as M0.5 item 5.
   landed, and with CSI data movement that depends on `DataUpload` completing
   during `Finalizing`. Verify before the agent trusts terminal phase.
 - **Range GETs on composite objects under load.** Case 03 exercises them, but
-  with 40 MiB and one volume. Restore throughput belongs to M6's benchmarks.
-- **A live Bee node in the harness.** Everything above ran against fakebee. The
-  M0 work confirmed the read path on a real light node, but no Velero backup
-  has yet gone to real Swarm.
+  with 40 MiB and one volume, and only against fakebee — the live profile has
+  so far run the resource cases, not the Kopia one. Restore throughput belongs
+  to M6's benchmarks.
+## The live-Bee run
+
+`BEE_MODE=live hack/e2e/up.sh` points the gateway at a real Bee node instead of
+fakebee, so backups land on Swarm proper. Run against a funded **light** node
+(`v2.8.2`, Gnosis, a depth-19 batch):
+
+- Case 01 (resource round-trip) — **pass**
+- Case 02 (snapshot barrier on the encrypted bucket) — **pass**, root
+  `a177199d…` returned and the head advanced
+
+Then the tier-C read position, using only the resulting 32-byte root and the
+node — no gateway, no index, no credentials (`hack/e2e/chainwalk`):
+
+```
+bucket: velero | seq: 3 | objects: 32
+sealed refs: 32 | plaintext refs: 0
+128-hex key-bearing strings anywhere: 0
+```
+
+So on real Swarm, a public commit root describes 32 real Velero objects and
+discloses no decryption key for any of them. That is the whole point of the
+s3warm v0.5.0 work, confirmed under production conditions rather than against a
+model of Bee.
+
+Two harness details cost time and are worth writing down, because both present
+as gateway faults:
+
+- **A Bee node binds its API to `127.0.0.1`.** A gateway container on a bridge
+  network cannot reach it — `connection refused` via `host-gateway`. The live
+  profile therefore runs the gateway on the **host** network and points the BSL
+  at kind's own network gateway, which *is* the host.
+- **kind's docker network is dual-stack.** Taking `IPAM.Config[0].Gateway`
+  yields the IPv6 address, and an IPv6 literal in `s3Url` also needs brackets,
+  which Velero's plain-string config will not carry. Select the IPv4 gateway
+  explicitly.
+
+## What remains for A4

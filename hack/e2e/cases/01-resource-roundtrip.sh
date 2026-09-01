@@ -21,7 +21,7 @@ kubectl -n "$NS" rollout status deployment/web --timeout=120s
 
 log "backup $BACKUP"
 velero backup create "$BACKUP" --include-namespaces "$NS" --wait
-velero backup describe "$BACKUP" --details > "${TMPDESC:=$(mktemp)}"; sed -n '1,12p' "$TMPDESC"
+DESC=$(mktemp); velero backup describe "$BACKUP" --details > "$DESC"; sed -n '1,12p' "$DESC"; rm -f "$DESC"
 PHASE=$(kubectl -n velero get backup "$BACKUP" -o jsonpath='{.status.phase}')
 [ "$PHASE" = "Completed" ] || { echo "backup phase=$PHASE"; velero backup logs "$BACKUP" | tail -30; exit 1; }
 

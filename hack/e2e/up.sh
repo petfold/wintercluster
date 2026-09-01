@@ -28,27 +28,70 @@ log "s3warm gateway (from $S3WARM_REPO)"
 [ -d "$S3WARM_REPO" ] || { echo "s3warm checkout not found at $S3WARM_REPO; set S3WARM_REPO" >&2; exit 1; }
 docker rm -f wc-fakebee wc-s3warm >/dev/null 2>&1 || true
 docker build -q -t wintercluster/s3warm:e2e "$S3WARM_REPO" >/dev/null
-docker run -d --name wc-fakebee --network kind --entrypoint fakebee \
-  wintercluster/s3warm:e2e >/dev/null
-until docker exec wc-fakebee wget -qO- http://localhost:1633/health >/dev/null 2>&1; do sleep 1; done
 
-BATCH=$(docker run --rm --network kind curlimages/curl:8.11.1 -sf \
-  -X POST "http://wc-fakebee:1633/stamps/100000000000/24" \
-  | sed -n 's/.*"batchID":"\([0-9a-f]*\)".*/\1/p')
-[ -n "$BATCH" ] || { echo "could not buy a dev postage batch" >&2; exit 1; }
-echo "  batch: $BATCH"
+# BEE_MODE=fake (default) runs the in-tree stand-in, which is what CI uses.
+# BEE_MODE=live points the gateway at a real Bee node on the host: backups then
+# land on Swarm proper, which is the only way to know the whole thing works
+# rather than that it works against a model of Bee.
+BEE_EXTRA=()
+if [ "${BEE_MODE:-fake}" = "live" ]; then
+  BEE_HOST_API=${BEE_HOST_API:-http://localhost:1633}
+  curl -sf -m 10 "$BEE_HOST_API/health" >/dev/null || {
+    echo "no Bee node answering at $BEE_HOST_API" >&2; exit 1; }
+  # Pick a usable batch with real capacity rather than buying one: real
+  # postage costs real BZZ, and the harness must never spend it silently.
+  BATCH=$(curl -sf -m 15 "$BEE_HOST_API/stamps" | python3 -c '
+import json, sys
+best = None
+for b in json.load(sys.stdin)["stamps"]:
+    if not b["usable"]:
+        continue
+    free = 2 ** (b["depth"] - 16) - b["utilization"]
+    if b["batchTTL"] > 1800 and free > 0 and (best is None or free > best[1]):
+        best = (b["batchID"], free)
+print(best[0] if best else "")')
+  [ -n "$BATCH" ] || { echo "no usable batch with capacity and >30m TTL on $BEE_HOST_API" >&2; exit 1; }
+  echo "  live Bee at $BEE_HOST_API, batch ${BATCH:0:16}..."
+  # A Bee node normally binds its API to 127.0.0.1, so a container on a bridge
+  # network cannot reach it (connection refused via host-gateway). Run the
+  # gateway on the host network instead; pods then reach it through kind's own
+  # network gateway, which is the host.
+  BEE_EXTRA=(--network host -e "S3WARM_BEE_API=$BEE_HOST_API")
+  GATEWAY_ON_HOST=1
+else
+  docker run -d --name wc-fakebee --network kind --entrypoint fakebee \
+    wintercluster/s3warm:e2e >/dev/null
+  until docker exec wc-fakebee wget -qO- http://localhost:1633/health >/dev/null 2>&1; do sleep 1; done
+  BATCH=$(docker run --rm --network kind curlimages/curl:8.11.1 -sf \
+    -X POST "http://wc-fakebee:1633/stamps/100000000000/24" \
+    | sed -n 's/.*"batchID":"\([0-9a-f]*\)".*/\1/p')
+  [ -n "$BATCH" ] || { echo "could not buy a dev postage batch" >&2; exit 1; }
+  echo "  fakebee, batch: $BATCH"
+  BEE_EXTRA=(--network kind -e "S3WARM_BEE_API=http://wc-fakebee:1633")
+  GATEWAY_ON_HOST=0
+fi
 
-docker run -d --name wc-s3warm --network kind \
-  -e S3WARM_BEE_API=http://wc-fakebee:1633 \
+docker run -d --name wc-s3warm \
+  "${BEE_EXTRA[@]}" \
   -e S3WARM_BATCH_ID="$BATCH" \
   -e S3WARM_ACCESS_KEY="$S3_ACCESS_KEY" \
   -e S3WARM_SECRET_KEY="$S3_SECRET_KEY" \
   -e S3WARM_DB=/data/s3warm.db \
-  -p 8333:8333 \
+  $( [ "$GATEWAY_ON_HOST" = 1 ] || echo "-p 8333:8333" ) \
   wintercluster/s3warm:e2e >/dev/null
 until curl -sf -o /dev/null http://localhost:8333/_s3warm/ready 2>/dev/null; do sleep 1; done
 
-S3WARM_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' wc-s3warm)
+if [ "$GATEWAY_ON_HOST" = 1 ]; then
+  # kind's network gateway is the host, so this is where pods find the gateway.
+  # kind's network is dual-stack; take the IPv4 gateway. An IPv6 literal would
+  # also need brackets in the URL, and Velero's config takes a plain string.
+  S3WARM_IP=$(docker network inspect kind \
+    -f '{{range .IPAM.Config}}{{if not (regexMatch ":" .Gateway)}}{{.Gateway}}{{end}}{{end}}' 2>/dev/null)
+  [ -n "$S3WARM_IP" ] || S3WARM_IP=$(docker network inspect kind \
+    --format '{{json .IPAM.Config}}' | python3 -c 'import json,sys; print(next(c["Gateway"] for c in json.load(sys.stdin) if ":" not in c.get("Gateway","")))')
+else
+  S3WARM_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' wc-s3warm)
+fi
 S3_URL="http://${S3WARM_IP}:8333"
 echo "  reachable from pods at $S3_URL"
 echo "$S3_URL" > "$HERE/.s3url"
