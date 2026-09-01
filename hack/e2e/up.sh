@@ -85,10 +85,10 @@ if [ "$GATEWAY_ON_HOST" = 1 ]; then
   # kind's network gateway is the host, so this is where pods find the gateway.
   # kind's network is dual-stack; take the IPv4 gateway. An IPv6 literal would
   # also need brackets in the URL, and Velero's config takes a plain string.
-  S3WARM_IP=$(docker network inspect kind \
-    -f '{{range .IPAM.Config}}{{if not (regexMatch ":" .Gateway)}}{{.Gateway}}{{end}}{{end}}' 2>/dev/null)
-  [ -n "$S3WARM_IP" ] || S3WARM_IP=$(docker network inspect kind \
-    --format '{{json .IPAM.Config}}' | python3 -c 'import json,sys; print(next(c["Gateway"] for c in json.load(sys.stdin) if ":" not in c.get("Gateway","")))')
+  # Done in python rather than a Go template: docker templates have no regex
+  # helper, and a failing assignment aborts the script before any fallback.
+  S3WARM_IP=$(docker network inspect kind --format '{{json .IPAM.Config}}' \
+    | python3 -c 'import json,sys; print(next(c["Gateway"] for c in json.load(sys.stdin) if ":" not in c.get("Gateway","")))')
 else
   S3WARM_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' wc-s3warm)
 fi

@@ -71,6 +71,7 @@ harness would be testing a configuration that is either broken or unsafe, so
 | 03 | Kopia file-system backup of 40 MiB → destroy → restore → byte-compare | **pass** — MD5 identical; 25 objects under `kopia/` |
 | 04 | `velero backup download` (presigned GET), then `velero backup delete` | **pass** — valid gzip containing the expected resources; deletion clears the S3 view |
 | 05 | Backup sync: drop the Backup CR, let Velero repopulate from the bucket | **pass** — re-synced in ~60 s and the resynced backup restores |
+| 06 | Kopia backup of a **CSI PersistentVolume** → destroy → restore → byte-compare | **pass**, on fakebee *and* against a live Bee node |
 
 Case 04 also demonstrates the property DESIGN §4 is built on: after
 `velero backup delete` removed all 9 objects from the S3 view, restoring the
@@ -88,7 +89,7 @@ backups destroyed.
 Neither is an s3warm defect; both change how the harness and the M6 drill must
 be built.
 
-**1. File-system backup silently skips hostPath volumes.** kind's default
+**1. File-system backup silently skips hostPath volumes.** *(Resolved for the harness by `hack/e2e/csi.sh`; the behaviour itself is unchanged and still a trap.)* kind's default
 storage class (`rancher.io/local-path`) provisions hostPath PVs, and Velero's
 FSB does not back them up. The failure mode is the dangerous kind: **no
 PodVolumeBackup is created, and the backup still reports `Completed`**. The
@@ -96,8 +97,8 @@ first version of case 03 passed its phase checks while capturing no volume data
 at all; only the restore's checksum comparison caught it.
 
 Consequences: case 03 uses an `emptyDir`, which exercises the same Kopia code
-path; covering **PVC-backed** volumes needs a CSI driver in the cluster
-(`csi-driver-host-path`), which M1 has not yet installed. And every case that
+path; case 06 covers **PVC-backed** volumes and needs `csi-driver-host-path`,
+installed by `hack/e2e/csi.sh`. And every case that
 claims to test volume data must assert a completed PodVolumeBackup moving a
 plausible number of bytes — a phase check alone will pass on a silent skip.
 Case 03 now does.
@@ -110,14 +111,16 @@ claim to. Tracked as M0.5 item 5.
 ## What remains for A4
 
 - **CSI snapshot data movement** (`DataUpload`/`DataDownload`) — the stretch
-  goal in TASKS.md M1, and untested. It matters beyond coverage: DESIGN §5.2
+  goal in TASKS.md M1, and still untested. The CSI driver and snapshot
+  controller are now installed, so the remaining work is a VolumeSnapshotClass
+  and a backup with `--snapshot-move-data`. It matters beyond coverage: DESIGN §5.2
   assumes that at a Backup's terminal phase every object of that backup has
   landed, and with CSI data movement that depends on `DataUpload` completing
   during `Finalizing`. Verify before the agent trusts terminal phase.
-- **Range GETs on composite objects under load.** Case 03 exercises them, but
-  with 40 MiB and one volume, and only against fakebee — the live profile has
-  so far run the resource cases, not the Kopia one. Restore throughput belongs
-  to M6's benchmarks.
+- **Composite objects and range-stitched reads are not exercised at all** by
+  Velero + Kopia at these sizes — every upload was single-part (see above).
+  M6's benchmarks must construct that case deliberately rather than assume a
+  volume backup covers it.
 ## The live-Bee run
 
 `BEE_MODE=live hack/e2e/up.sh` points the gateway at a real Bee node instead of
@@ -141,6 +144,38 @@ So on real Swarm, a public commit root describes 32 real Velero objects and
 discloses no decryption key for any of them. That is the whole point of the
 s3warm v0.5.0 work, confirmed under production conditions rather than against a
 model of Bee.
+
+### Kopia volume data on real Swarm
+
+With a CSI storage class installed (`hack/e2e/csi.sh`), case 06 backs up a
+40 MiB PersistentVolume through Kopia to a live Bee node, destroys the
+namespace and PVC, restores, and byte-compares. **Pass** — MD5 identical.
+
+Walking the resulting chain from the node with only the root:
+
+```
+bucket: velero | seq: 8 | objects: 27
+by prefix: {'backups': 9, 'kopia': 13, 'restores': 5}
+sealed: 27 | plaintext refs: 0
+composite (multipart) objects: 0
+key-bearing 128-hex strings anywhere: 0
+largest: kopia/wc-pvc/p55570bad… 28,295,570 B  sealed=True
+```
+
+So a 28 MB Kopia pack blob holding real volume data sits in the chain sealed,
+and the whole 27-object bucket — resource tarballs, Kopia blobs and restore
+records alike — discloses nothing.
+
+**Kopia did not use multipart uploads.** Every object, including the 28 MB
+pack blob, was written as a single-part PUT. That is worth recording for two
+reasons. It means this workload does not exercise s3warm's composite path or
+range-stitched reads at all, so COMPAT cannot claim they are proven by it —
+DESIGN §9's restore-throughput work will have to reach for them deliberately.
+And it means the multipart-SSE case, which was the one that leaked before
+s3warm v0.5.0, is not reached by a default Velero/Kopia configuration at these
+sizes. Larger pack blobs or a different uploader may cross the threshold, so
+the sealing must stay correct for both paths regardless — it is, and s3warm's
+tests cover both.
 
 Two harness details cost time and are worth writing down, because both present
 as gateway faults:
