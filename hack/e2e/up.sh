@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Bring up the M1 harness: a kind cluster, an s3warm gateway it can reach, and
+# Velero configured to back up to that gateway.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=versions.env
+source "$HERE/versions.env"
+export PATH="$HERE/bin:$PATH"
+
+log() { printf '\n=== %s\n' "$*"; }
+
+log "toolchain"
+"$HERE/tools.sh" >/dev/null
+kind version
+
+log "kind cluster: $CLUSTER_NAME"
+if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+  echo "  already exists"
+else
+  kind create cluster --name "$CLUSTER_NAME" --wait 120s
+fi
+kubectl cluster-info --context "kind-$CLUSTER_NAME" | head -2
+
+# The gateway runs on kind's own docker network so cluster pods can reach it.
+# Pods cannot resolve docker container names (no Kubernetes DNS entry for
+# them), so the BSL is pointed at the container's IP on that network.
+log "s3warm gateway (from $S3WARM_REPO)"
+[ -d "$S3WARM_REPO" ] || { echo "s3warm checkout not found at $S3WARM_REPO; set S3WARM_REPO" >&2; exit 1; }
+docker rm -f wc-fakebee wc-s3warm >/dev/null 2>&1 || true
+docker build -q -t wintercluster/s3warm:e2e "$S3WARM_REPO" >/dev/null
+docker run -d --name wc-fakebee --network kind --entrypoint fakebee \
+  wintercluster/s3warm:e2e >/dev/null
+until docker exec wc-fakebee wget -qO- http://localhost:1633/health >/dev/null 2>&1; do sleep 1; done
+
+BATCH=$(docker run --rm --network kind curlimages/curl:8.11.1 -sf \
+  -X POST "http://wc-fakebee:1633/stamps/100000000000/24" \
+  | sed -n 's/.*"batchID":"\([0-9a-f]*\)".*/\1/p')
+[ -n "$BATCH" ] || { echo "could not buy a dev postage batch" >&2; exit 1; }
+echo "  batch: $BATCH"
+
+docker run -d --name wc-s3warm --network kind \
+  -e S3WARM_BEE_API=http://wc-fakebee:1633 \
+  -e S3WARM_BATCH_ID="$BATCH" \
+  -e S3WARM_ACCESS_KEY="$S3_ACCESS_KEY" \
+  -e S3WARM_SECRET_KEY="$S3_SECRET_KEY" \
+  -e S3WARM_DB=/data/s3warm.db \
+  -p 8333:8333 \
+  wintercluster/s3warm:e2e >/dev/null
+until curl -sf -o /dev/null http://localhost:8333/_s3warm/ready 2>/dev/null; do sleep 1; done
+
+S3WARM_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' wc-s3warm)
+S3_URL="http://${S3WARM_IP}:8333"
+echo "  reachable from pods at $S3_URL"
+echo "$S3_URL" > "$HERE/.s3url"
+echo "$BATCH"  > "$HERE/.batch"
+
+log "BSL bucket: $BSL_BUCKET"
+"$HERE/s3.sh" mb "$BSL_BUCKET"
+
+log "velero $VELERO_VERSION"
+kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
+cat > "$HERE/.credentials" <<CRED
+[default]
+aws_access_key_id=$S3_ACCESS_KEY
+aws_secret_access_key=$S3_SECRET_KEY
+CRED
+velero install \
+  --provider aws \
+  --plugins "velero/velero-plugin-for-aws:${VELERO_PLUGIN_AWS_VERSION}" \
+  --bucket "$BSL_BUCKET" \
+  --secret-file "$HERE/.credentials" \
+  --use-volume-snapshots=false \
+  --use-node-agent \
+  --backup-location-config "region=us-east-1,s3ForcePathStyle=true,s3Url=${S3_URL}" \
+  --wait
+
+log "ready"
+kubectl -n velero get pods
+velero backup-location get

@@ -1,0 +1,4 @@
+bin/
+.credentials
+.s3url
+.batch
