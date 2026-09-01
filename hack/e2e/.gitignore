@@ -2,3 +2,6 @@ bin/
 .credentials
 .s3url
 .batch
+.recovery-identity
+.recovery-recipient
+.recovery-keys

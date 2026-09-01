@@ -62,6 +62,21 @@ def main():
         if st not in (200, 409):
             sys.exit(f"create bucket {bucket}: {st} {body.decode()[:200]}")
         print(f"  bucket {bucket}: {st}")
+    elif cmd == "objhead":
+        bucket, key = args[0], args[1]
+        st, h, _ = request("HEAD", f"/{bucket}/{key}")
+        print(f"status={st} sse={header(h,'x-amz-server-side-encryption')} "
+              f"ref={header(h,'x-swarm-reference') or '<SUPPRESSED>'}")
+    elif cmd == "sse-on":
+        bucket = args[0]
+        cfg = (b"<ServerSideEncryptionConfiguration><Rule>"
+               b"<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+               b"</ApplyServerSideEncryptionByDefault></Rule>"
+               b"</ServerSideEncryptionConfiguration>")
+        st, _, body = request("PUT", f"/{bucket}", {"encryption": ""}, cfg)
+        if st != 200:
+            sys.exit(f"put bucket encryption on {bucket}: {st} {body.decode()[:200]}")
+        print(f"  default SSE on {bucket}: {st}")
     elif cmd == "ls":
         bucket = args[0]
         params = {"list-type": "2"}

@@ -54,8 +54,30 @@ echo "  reachable from pods at $S3_URL"
 echo "$S3_URL" > "$HERE/.s3url"
 echo "$BATCH"  > "$HERE/.batch"
 
-log "BSL bucket: $BSL_BUCKET"
-"$HERE/s3.sh" mb "$BSL_BUCKET"
+# DESIGN §5.4 mandates SSE-S3 on the BSL bucket: Velero does not client-side
+# encrypt its resource tarballs, and they contain every Secret in the cluster.
+# That means the bucket also needs a recovery recipient, or its commit chain
+# cannot carry the encrypted references and stops — which would silently
+# remove the thing wintercluster is built on. Testing any other shape would be
+# testing a configuration nobody should deploy.
+log "recovery keypair"
+if [ ! -s "$HERE/.recovery-identity" ]; then
+  ( cd "$HERE/agekeygen" && go run . ) > "$HERE/.recovery-keys"
+  head -1 "$HERE/.recovery-keys" > "$HERE/.recovery-recipient"
+  tail -1 "$HERE/.recovery-keys" > "$HERE/.recovery-identity"
+  chmod 600 "$HERE/.recovery-keys" "$HERE/.recovery-identity"
+  rm -f "$HERE/.recovery-keys"
+  echo "  generated"
+else
+  echo "  reusing existing"
+fi
+RECIPIENT=$(cat "$HERE/.recovery-recipient")
+echo "  recipient: $RECIPIENT"
+
+log "BSL bucket: $BSL_BUCKET (SSE-S3, sealed chain)"
+"$HERE/s3.sh" mb "$BSL_BUCKET" "$RECIPIENT"
+"$HERE/s3.sh" sse-on "$BSL_BUCKET"
+"$HERE/s3.sh" head "$BSL_BUCKET" | sed "s/^/  /"
 
 log "velero $VELERO_VERSION"
 kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
