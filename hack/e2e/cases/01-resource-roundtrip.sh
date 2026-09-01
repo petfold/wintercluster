@@ -4,16 +4,16 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$HERE/versions.env"
+# shellcheck source=../lib.sh
+source "$HERE/lib.sh"
 export PATH="$HERE/bin:$PATH"
 NS=wc-resources
 BACKUP="resources-$(date +%s)"
 
-log() { printf '\n--- %s\n' "$*"; }
 trap 'kubectl delete ns "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
 
 log "workload with known contents"
-kubectl delete ns "$NS" --ignore-not-found --wait >/dev/null 2>&1 || true
-kubectl create ns "$NS"
+new_ns "$NS"
 kubectl -n "$NS" create configmap app-config --from-literal=greeting=hello-winter
 kubectl -n "$NS" create secret generic app-secret --from-literal=password=hunter2
 kubectl -n "$NS" create deployment web --image=registry.k8s.io/pause:3.10 --replicas=2

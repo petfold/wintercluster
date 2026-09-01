@@ -9,11 +9,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$HERE/versions.env"
+# shellcheck source=../lib.sh
+source "$HERE/lib.sh"
 export PATH="$HERE/bin:$PATH" S3_EP=http://localhost:8333
 NS=wc-barrier
 BACKUP="barrier-$(date +%s)"
 
-log() { printf '\n--- %s\n' "$*"; }
 trap 'kubectl delete ns "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
 
 log "bucket must be encrypted and sealable, or this proves nothing"
@@ -26,8 +27,7 @@ esac
 SEQ_BEFORE=$(sed -n 's/.*seq=\([0-9]*\).*/\1/p' <<<"$HEAD")
 
 log "workload and backup"
-kubectl delete ns "$NS" --ignore-not-found --wait >/dev/null 2>&1 || true
-kubectl create ns "$NS" >/dev/null
+new_ns "$NS"
 kubectl -n "$NS" create configmap marker --from-literal=k=v >/dev/null
 velero backup create "$BACKUP" --include-namespaces "$NS" --wait >/dev/null
 PHASE=$(kubectl -n velero get backup "$BACKUP" -o jsonpath='{.status.phase}')

@@ -7,28 +7,37 @@
 # The data is checksummed, so a restore that returns *something* is not
 # mistaken for a restore that returns the right bytes.
 #
-# The volume is an emptyDir, not a PVC, and that is deliberate: kind's default
-# storage class (rancher.io/local-path) provisions **hostPath** PVs, and
-# Velero's file-system backup skips hostPath volumes outright — no
-# PodVolumeBackup is created and the backup still reports Completed, having
-# silently captured no data. Covering PVC-backed volumes needs a CSI driver in
-# the cluster; see docs/COMPAT.md. What this case exercises — Kopia's
-# repository on s3warm, its pack blobs, and a byte-exact restore — is identical
-# either way.
+# This is the PVC variant of case 03, and the realistic shape: a stateful
+# workload whose data lives on a PersistentVolume. It requires a CSI storage
+# class (hack/e2e/csi.sh) — kind's default provisions hostPath PVs, which
+# Velero's file-system backup skips silently.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$HERE/versions.env"
 # shellcheck source=../lib.sh
 source "$HERE/lib.sh"
 export PATH="$HERE/bin:$PATH" S3_EP=http://localhost:8333
-NS=wc-volume
-BACKUP="volume-$(date +%s)"
+NS=wc-pvc
+BACKUP="pvcvol-$(date +%s)"
+SC=${SC:-csi-hostpath-sc}
 
 trap 'kubectl delete ns "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
 
 log "stateful workload with checksummable data"
 new_ns "$NS"
-kubectl -n "$NS" apply -f - >/dev/null <<'YAML'
+kubectl get sc "$SC" >/dev/null 2>&1 || { echo "storage class $SC missing; run hack/e2e/csi.sh"; exit 1; }
+kubectl -n "$NS" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: $SC
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -43,7 +52,8 @@ spec:
           mountPath: /data
   volumes:
     - name: data
-      emptyDir: {}
+      persistentVolumeClaim:
+        claimName: data
 YAML
 kubectl -n "$NS" wait --for=condition=Ready pod/writer --timeout=180s
 
@@ -82,7 +92,7 @@ KOPIA=$("$HERE/s3.sh" ls "$BSL_BUCKET" "kopia/")
 sed -n '1,12p' <<<"$KOPIA" | sed 's/^/  /'
 echo "  ... $(wc -l <<<"$KOPIA") objects under kopia/"
 
-log "destroy the namespace and its volume"
+log "destroy the namespace, PVC and all"
 kubectl delete ns "$NS" --wait
 kubectl get ns "$NS" >/dev/null 2>&1 && { echo "namespace survived"; exit 1; }
 
@@ -106,4 +116,4 @@ if [ "$BEFORE" != "$AFTER" ]; then
 fi
 kubectl -n "$NS" exec writer -- sh -c 'md5sum -c /data/CHECKSUMS' | sed 's/^/  /'
 
-printf '\nPASS: Kopia file-system backup and restore is byte-identical through s3warm\n'
+printf '\nPASS: Kopia file-system backup of a CSI PersistentVolume round-trips byte-identically\n'
