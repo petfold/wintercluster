@@ -62,6 +62,17 @@ def main():
         if st not in (200, 409):
             sys.exit(f"create bucket {bucket}: {st} {body.decode()[:200]}")
         print(f"  bucket {bucket}: {st}")
+    elif cmd == "restore":
+        bucket, root = args[0], args[1]
+        hdrs = {}
+        idfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".recovery-identity")
+        if os.path.exists(idfile):
+            # Sealed references need the identity to rebuild an index; the
+            # gateway never stores it (s3warm DESIGN §5).
+            hdrs["x-swarm-recovery-identity"] = open(idfile).read().strip()
+        st, _, body = request("POST", f"/{bucket}", {"x-swarm-restore": root}, headers=hdrs)
+        print(body.decode()[:300])
+        sys.exit(0 if st == 200 else 1)
     elif cmd == "objhead":
         bucket, key = args[0], args[1]
         st, h, _ = request("HEAD", f"/{bucket}/{key}")

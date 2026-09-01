@@ -78,8 +78,9 @@ BYTES=$(awk '{print $2}' <<<"$PVB")
 [ "${BYTES:-0}" -gt $((30 * 1024 * 1024)) ] || { echo "PodVolumeBackup moved only ${BYTES:-0} bytes"; exit 1; }
 
 log "what Kopia wrote to the bucket"
-"$HERE/s3.sh" ls "$BSL_BUCKET" "kopia/" | head -12 | sed 's/^/  /'
-echo "  ... $("$HERE/s3.sh" ls "$BSL_BUCKET" "kopia/" | wc -l) objects under kopia/"
+KOPIA=$("$HERE/s3.sh" ls "$BSL_BUCKET" "kopia/")
+sed -n '1,12p' <<<"$KOPIA" | sed 's/^/  /'
+echo "  ... $(wc -l <<<"$KOPIA") objects under kopia/"
 
 log "destroy the namespace and its volume"
 kubectl delete ns "$NS" --wait
