@@ -4,8 +4,8 @@ Kubernetes disaster recovery on [Swarm](https://www.ethswarm.org/). Velero backs
 
 **The whole disaster-recovery position reduces to one commit root, one feed coordinate pair, and two user-held secrets.** Small enough to print and put in a safe.
 
-> **Status: design only. No code exists yet.**
-> This repository currently holds a design and an implementation plan. Every claim below about s3warm is either marked `[VERIFIED]` against its docs or `[ASSUMED]` and gated behind milestone M0, which resolves the open questions against real code and a live stack before anything gets built. Nothing here has been measured. See [`docs/TASKS.md`](docs/TASKS.md).
+> **Status: M0 and M1 complete. The agent and CLI are not written yet.**
+> What exists is the design, the recon that validated it, and an end-to-end test harness. Velero backs up a Kubernetes cluster to Swarm through s3warm and restores it byte-identically — verified against a live Bee node, with the backup bucket encrypted. `wintercluster-agent` and the `wintercluster` CLI, and therefore the recovery card itself, are still to be built (M4–M5). No performance numbers are claimed; M6 produces those. See [`docs/TASKS.md`](docs/TASKS.md).
 
 ## The problem
 
@@ -34,6 +34,17 @@ Card production runs *after* the backup and can never fail one — but it is nev
 
 Tier C is the reason this project exists, and the acceptance test for all of it: *destroy the cluster, the gateway, the index, and the Bee node; restore the workload byte-identically from a hash, a passphrase, and any Bee node.* That drill is milestone M6, and it runs in CI or the project is not done.
 
+## What has been established so far
+
+Not claims — measured, with the evidence in `docs/`:
+
+- **Velero works against s3warm unmodified**, with the stock AWS plugin and no native plugin of our own. Seven cases: resource round-trip, Kopia file-system backup of a CSI PersistentVolume, CSI snapshot data movement, presigned download, deletion, and backup re-sync. All byte-compared, not existence-checked.
+- **The backup bucket is encrypted and still has a commit chain.** That combination did not exist until s3warm v0.5.0. Encrypted objects' references embed their decryption keys, so publishing them in the public chain handed out read access to every backup — [found here](docs/GAPS.md) and fixed upstream ([s3warm#1](https://github.com/petfold/s3warm/pull/1)). Walking a real chain from a bare Bee node now returns 27 Velero objects, every reference sealed, no key anywhere.
+- **A light Bee node is enough** to read the whole tier-C path, and the data genuinely propagates: the same objects fetch from a public gateway, byte-identical.
+- **The trigger the agent will use is sound.** With CSI data movement, volume data lands before the Backup reaches a terminal phase — measured at 6.0 s, and asserted on timestamps so a future Velero that reorders it fails the test.
+
+What this does **not** yet protect: the *shape* of your backups. A commit root still exposes object names, sizes and timestamps, so it reads as your backup schedule and namespace names even though the contents are unreadable. [DESIGN §13.6](docs/DESIGN.md) proposes the fix.
+
 ## The recovery card
 
 A small signed JSON document naming the bucket, the commit root, the feed coordinates to re-derive that root if the card is lost, the Velero backup it belongs to, and the postage batch TTL at capture time. Sensitive fields are [age](https://age-encryption.org)-encrypted under a recovery passphrase and any additional recipient keys you configure.
@@ -55,10 +66,13 @@ Deleting a backup does not delete the bytes. Physical chunks remain until their 
 | | |
 |---|---|
 | [`docs/DESIGN.md`](docs/DESIGN.md) | The design. Threat model, card schema, flows, open questions. Read the `[VERIFIED]` / `[ASSUMED]` markers. |
-| [`docs/TASKS.md`](docs/TASKS.md) | Milestones M0–M6 and explicit non-goals. |
+| [`docs/TASKS.md`](docs/TASKS.md) | Milestones M0–M6 and explicit non-goals, with a status note under each finished one. |
+| [`docs/GAPS.md`](docs/GAPS.md) | M0's recon: what s3warm actually does, with file/line evidence and live-stack demonstrations. |
+| [`docs/COMPAT.md`](docs/COMPAT.md) | M1's result: the Velero configuration that works, every case exercised, and the limitations found. |
+| [`hack/e2e/`](hack/e2e/) | The harness. `up.sh`, then `run-all.sh`. |
 | `CLAUDE.md` | Working rules for this repository. |
 
-Not yet written, produced by the milestones that create them: `docs/GAPS.md` (M0), `docs/COMPAT.md` (M1), `docs/BENCH.md` (M6).
+Not yet written: `docs/BENCH.md` (M6).
 
 ## Not in scope
 
