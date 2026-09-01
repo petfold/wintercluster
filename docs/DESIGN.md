@@ -278,6 +278,7 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 - **The card is secret-by-default.** Even if A1 concludes roots are not capabilities, cards name buckets, clusters, and infrastructure; and under branch (a) the root *is* the bucket. Encrypted section always present; sinks documented with that assumption.
 - **Custody:** recovery passphrase and Kopia repository password are human-held, stored outside all systems this design can lose. The printed card + password manager is the recommended pairing. wintercluster never persists either.
 - **Resource tarballs:** Velero does not client-side-encrypt them and they contain every cluster `Secret` — hence SSE-S3 mandatory on the BSL bucket, and hence A1 is the gating question for tier-C completeness.
+- **The chain protects contents, not shape.** With s3warm ≥ v0.5.0 an encrypted object's bytes are unreadable without the recovery identity, but the commit document still names every object, its size, its plaintext MD5 and its timestamps. Anyone holding a root can therefore read the cluster's backup schedule, its namespace names, and its data growth — and can confirm guessed contents via the ETag. §13.6 proposes a sealed-chain mode; until it ships, say this plainly to operators rather than letting "encrypted backups" imply more than it does.
 - **Agent key:** rotate by publishing the new address in chart values; `card verify` accepts a configured set of valid signers with validity windows.
 - **Fraudulent feed updates** (gateway-key theft): cards pin exact roots and seq numbers; `verify` cross-checks card ↔ feed ↔ chain and flags divergence rather than trusting any single source.
 
@@ -291,6 +292,7 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 | `serve --read-only --root <ref>` mode | Tier C without local disk = bucket size; stateless gateway over an immutable root is also independently useful (share a snapshot as a live S3 endpoint) | Medium — M0 decides serve-mode vs `materialize`-only for v1 |
 | Fresh-gateway restore runbook hardening | A2: whatever `CreateBucket`+`restore-by-root` doesn't cover (bucket config, re-pinning) gets fixed or documented | Small–medium |
 | SSE-in-chain remedy | Only if A1 lands on branch (b)/(c): recovery-recipient encryption of SSE entries in the commit document | Medium; needs upstream design discussion first |
+| Sealed-chain mode (per-bucket) | §13.6: the chain still publishes key names, sizes and plaintext ETags. For a BSL that is a readable history of the cluster's backup schedule, and ETags are a confirmation oracle. Manifest carries only the commit fork; the document is encrypted whole to the recovery recipient | Medium; wants the same design discussion the SSE remedy had |
 | `demos/06-kubernetes-dr.sh` | The flagship demo lives where the other five live | Small |
 
 ---
@@ -303,7 +305,20 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 4. v2: stamp-underwriting integration — an underwritten batch behind the BSL bucket turns "backups persist" from an ops promise into an on-chain guarantee; the card would carry the policy reference. Design separately once v1 drills pass.
 5. v2: PSS/GSOC notification of new checkpoints to off-site listeners (upstream has this as open research).
 
-6. **How much of this should be *proved* rather than tested?** "Proof" means three different things here and they should not be muddled:
+6. **Should the commit chain's *metadata* be public at all?** Sealing (s3warm v0.5.0) protects object **bytes**. Everything else in the chain is still cleartext for anyone holding a root: full object keys, sizes, ETags, batch IDs, user metadata, timestamps. For a Velero BSL that is not a small residue — it is a readable operational history of the cluster.
+
+   - **Key names carry structure.** `backups/{backupName}/…` names every backup and its schedule cadence; `kopia/{namespace}/…` names namespaces. Gaps in the sequence show when backups stopped.
+   - **ETags are MD5 of the plaintext.** That is a confirmation oracle: an attacker who can guess a small object's contents can verify the guess without decrypting anything.
+   - **Sizes leak scale**, per namespace and over time.
+   - The manifest's fork names *are* the object keys, so sealing the commit document alone would not fix this — a bucket that wants metadata privacy must also stop publishing per-object forks and expose only the sealed document.
+
+   The chain is public because that is what makes a bucket `bzz://`-browsable and third-party verifiable. A Velero BSL wants neither: nobody browses a backup bucket, and the only party who should verify it holds the card. So the trade that makes the chain valuable elsewhere is a pure cost here.
+
+   Proposed remedy (an s3warm change, §12): a per-bucket **sealed-chain mode** in which the manifest carries only the reserved commit fork and the commit document is encrypted whole to the bucket's recovery recipient. A root then reveals that a bucket exists and roughly how much metadata it has, and nothing else. Recovery is unaffected — the card already carries the identity — and `bzz://` browsability is knowingly given up for buckets that never wanted it. wintercluster should mandate this mode for BSL buckets in §5.4 once it exists, exactly as it mandates SSE-S3.
+
+   Until then, state the exposure plainly in the docs rather than implying sealing made the chain private: **wintercluster currently protects backup contents, not the shape of the backup schedule.**
+
+7. **How much of this should be *proved* rather than tested?** "Proof" means three different things here and they should not be muddled:
 
    - **Cryptographic proof** — already load-bearing. The card's EIP-191 signature proves authorship; a commit root is a Merkle root over a mantaray trie, which means presence in a bucket is *provable with a path*, not only checkable by download.
    - **Machine-checked proof** — a model of the protocol, checked exhaustively over interleavings.
@@ -320,6 +335,8 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
    What is **not** worth attempting is whole-system verification. The failure modes this project has actually hit lived at boundaries a model would not have covered: a manifest library's fixed entry width, an S3 semantic that only the Ceph conformance suite encodes, a missing database migration, a test whose evidence collector raced and so passed by failing to look. Those are found by conformance suites, adversarial review, and drills. A proof would have said nothing about any of them.
 
    Decide (a) with M5, since it changes what `card verify` promises. (b) is worth doing before M2 hardens the tier-B runbook. (c) needs no decision — just do it alongside the code.
+
+   Note that (a) interacts with question 6: inclusion proofs over a *sealed* chain are still possible, but only for the keyholder, which is the party who verifies anyway.
 
 ## 14. Terminology
 
