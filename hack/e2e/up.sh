@@ -129,7 +129,12 @@ cat > "$HERE/.credentials" <<CRED
 aws_access_key_id=$S3_ACCESS_KEY
 aws_secret_access_key=$S3_SECRET_KEY
 CRED
+# EnableCSI is required for CSI snapshot data movement. Without it Velero
+# excludes VolumeSnapshot resources entirely and falls through to the
+# VolumeSnapshotter path, which reports "plugin doesn't support data movement"
+# and completes the backup having moved nothing.
 velero install \
+  --features=EnableCSI \
   --provider aws \
   --plugins "velero/velero-plugin-for-aws:${VELERO_PLUGIN_AWS_VERSION}" \
   --bucket "$BSL_BUCKET" \

@@ -33,8 +33,10 @@ config:
   s3Url: http://<gateway>:8333
 ```
 
-Installed with `--use-volume-snapshots=false` (there is no CSI snapshotter
-behind s3warm) and `--use-node-agent` (Kopia file-system backup).
+Installed with `--use-volume-snapshots=false` (there is no cloud snapshotter
+behind s3warm), `--use-node-agent` (Kopia file-system backup), and
+**`--features=EnableCSI`**, which is required for CSI snapshot data movement —
+see below.
 
 Three things about this are worth stating because getting them wrong looks
 like an s3warm fault:
@@ -72,6 +74,7 @@ harness would be testing a configuration that is either broken or unsafe, so
 | 04 | `velero backup download` (presigned GET), then `velero backup delete` | **pass** — valid gzip containing the expected resources; deletion clears the S3 view |
 | 05 | Backup sync: drop the Backup CR, let Velero repopulate from the bucket | **pass** — re-synced in ~60 s and the resynced backup restores |
 | 06 | Kopia backup of a **CSI PersistentVolume** → destroy → restore → byte-compare | **pass**, on fakebee *and* against a live Bee node |
+| 07 | **CSI snapshot data movement** (`--snapshot-move-data`): DataUpload → destroy → DataDownload → byte-compare | **pass**, and DataUpload finished 6.0 s before terminal phase |
 
 Case 04 also demonstrates the property DESIGN §4 is built on: after
 `velero backup delete` removed all 9 objects from the S3 view, restoring the
@@ -103,17 +106,47 @@ claims to test volume data must assert a completed PodVolumeBackup moving a
 plausible number of bytes — a phase check alone will pass on a silent skip.
 Case 03 now does.
 
-**2. Pinning is untestable in the dev stack.** `fakebee` implements no `/pins`
+**2. `--features=EnableCSI` is required, and its absence fails quietly.**
+Without it Velero excludes `volumesnapshots` and `volumesnapshotcontents`
+entirely, falls through to the VolumeSnapshotter path, and reports
+`VolumeSnapshotter plugin doesn't support data movement` in
+`backup describe --details` — while the backup itself reports **Completed**
+with no DataUpload and no volume data moved. Another instance of the pattern
+this milestone keeps hitting: the phase says success and nothing was captured.
+
+**3. Pinning is untestable in the dev stack.** `fakebee` implements no `/pins`
 endpoint, so the best-effort pin on snapshot creation silently no-ops. The
 harness therefore cannot assert that a snapshot root is pinned, and must not
 claim to. Tracked as M0.5 item 5.
 
+### CSI snapshot data movement, and the assumption it settles
+
+Case 07 backs up a CSI PersistentVolume with `--snapshot-move-data`: Velero
+takes a CSI VolumeSnapshot, the node agent moves the data to the BSL as a
+`DataUpload`, and a `DataDownload` reverses it on restore. 20 MiB round-trips
+byte-identically.
+
+The case exists for the ordering, not the coverage. **DESIGN §5.2 triggers card
+capture when a Backup reaches a terminal phase and assumes every object of that
+backup has landed by then.** With data movement the bytes are written by a
+separate DataUpload running while the Backup is `Finalizing`, so if a DataUpload
+could still be in flight at terminal phase, the agent would snapshot a bucket
+missing the backup's volume data and mint a card naming a root that cannot
+restore it. Measured:
+
+```
+DataUpload completed: 2026-09-01T19:04:39Z
+Backup    completed: 2026-09-01T19:04:45Z
+-> data landed 6.0s before the backup went terminal
+```
+
+The assumption holds for Velero v1.18.2. The case asserts it by comparing
+completion timestamps rather than by observing that a restore worked, so a
+future Velero that reorders this is caught rather than silently trusted.
+
 ## What remains for A4
 
-- **CSI snapshot data movement** (`DataUpload`/`DataDownload`) — the stretch
-  goal in TASKS.md M1, and still untested. The CSI driver and snapshot
-  controller are now installed, so the remaining work is a VolumeSnapshotClass
-  and a backup with `--snapshot-move-data`. It matters beyond coverage: DESIGN §5.2
+- Nothing blocking. CSI snapshot data movement is covered by case 07 (below). It matters beyond coverage: DESIGN §5.2
   assumes that at a Backup's terminal phase every object of that backup has
   landed, and with CSI data movement that depends on `DataUpload` completing
   during `Finalizing`. Verify before the agent trusts terminal phase.
@@ -188,5 +221,30 @@ as gateway faults:
   yields the IPv6 address, and an IPv6 literal in `s3Url` also needs brackets,
   which Velero's plain-string config will not carry. Select the IPv4 gateway
   explicitly.
+
+### CSI snapshot data movement, and the assumption it settles
+
+Case 07 backs up a CSI PersistentVolume with `--snapshot-move-data`: Velero
+takes a CSI VolumeSnapshot, the node agent moves the data to the BSL as a
+`DataUpload`, and a `DataDownload` reverses it on restore. 20 MiB round-trips
+byte-identically.
+
+The case exists for the ordering, not the coverage. **DESIGN §5.2 triggers card
+capture when a Backup reaches a terminal phase and assumes every object of that
+backup has landed by then.** With data movement the bytes are written by a
+separate DataUpload running while the Backup is `Finalizing`, so if a DataUpload
+could still be in flight at terminal phase, the agent would snapshot a bucket
+missing the backup's volume data and mint a card naming a root that cannot
+restore it. Measured:
+
+```
+DataUpload completed: 2026-09-01T19:04:39Z
+Backup    completed: 2026-09-01T19:04:45Z
+-> data landed 6.0s before the backup went terminal
+```
+
+The assumption holds for Velero v1.18.2. The case asserts it by comparing
+completion timestamps rather than by observing that a restore worked, so a
+future Velero that reorders this is caught rather than silently trusted.
 
 ## What remains for A4

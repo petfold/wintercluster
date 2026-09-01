@@ -73,6 +73,8 @@ Deliverable: `docs/COMPAT.md` — the BSL/plugin config that works (exact `s3Url
 
 Acceptance: scripted backup→restore→verify passes against the compose stack in CI; COMPAT.md documents a clean run against a live Bee node at least once, manually.
 
+**Status (2026-09-01): done.** `docs/COMPAT.md` answers A4. Seven cases pass in `hack/e2e`, against fakebee and against a live Bee light node: resource round-trip, snapshot barrier on an encrypted bucket, Kopia file-system backup (emptyDir and CSI PVC), presigned download and deletion, backup re-sync, and CSI snapshot data movement. The BSL is SSE-S3 with a recovery recipient throughout — the configuration §5.4 mandates, which only became possible with s3warm v0.5.0. Case 07 resolves the `[ASSUMED]` marker in §5.2: with data movement, the DataUpload completed 6.0 s before the Backup went terminal, so triggering on terminal phase is sound for Velero v1.18.2. Three limitations are recorded rather than papered over: file-system backup silently skips hostPath volumes (kind's default), `--features=EnableCSI` is required and its absence fails as a Completed backup that moved nothing, and pinning cannot be tested until fakebee grows `/pins`. Velero and Kopia issue no multipart uploads at these sizes, so s3warm's composite path is untested by this workload and M6 must construct that case deliberately.
+
 Two constraints from M0. Until M0.5 lands, M1 runs against **plaintext buckets only** — an SSE bucket cannot commit, so any drill involving the chain is untestable in the mandated configuration; say so in COMPAT.md rather than quietly testing the wrong thing. And the harness must not claim pin coverage until fakebee grows `/pins` (M0.5 item 5).
 
 ## M2 — s3warm PRs: feed surfacing + tier-B hardening
