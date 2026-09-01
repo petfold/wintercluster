@@ -303,6 +303,24 @@ Snapshot pinning protects roots from the *gateway node's* local GC only [VERIFIE
 4. v2: stamp-underwriting integration — an underwritten batch behind the BSL bucket turns "backups persist" from an ops promise into an on-chain guarantee; the card would carry the policy reference. Design separately once v1 drills pass.
 5. v2: PSS/GSOC notification of new checkpoints to off-site listeners (upstream has this as open research).
 
+6. **How much of this should be *proved* rather than tested?** "Proof" means three different things here and they should not be muddled:
+
+   - **Cryptographic proof** — already load-bearing. The card's EIP-191 signature proves authorship; a commit root is a Merkle root over a mantaray trie, which means presence in a bucket is *provable with a path*, not only checkable by download.
+   - **Machine-checked proof** — a model of the protocol, checked exhaustively over interleavings.
+   - **Empirical proof** — the M6 drill. This is the acceptance test for the whole project and nothing below replaces it.
+
+   Three candidates look worth the effort, in descending order of value per hour:
+
+   **(a) Inclusion proofs in `card verify`.** Because the root is a Merkle root, `verify` can prove that *this* backup's `resources.tar.gz` with *this* ETag is under *this* root by fetching one path through the trie, rather than materialising the bucket. For a BSL holding hundreds of GB of Kopia blobs that is the difference between a verification anyone will run and one nobody will. It also strengthens the threat model in §4: a holder of a fraudulent card cannot produce a valid path for an object that is not there. This is a v1 candidate, not research — the structure already exists, and §5.3's `card verify` is where it belongs.
+
+   **(b) A state-machine model of commit → restore → checkpoint.** One concrete hazard motivates this. Feed indices are derived as `seq − 1`, and a bucket restore resets the head to the restored commit's sequence — so rolling back and writing again produces a *second, different* commit at a sequence whose feed index is already occupied, and sequence-feed updates are single-owner SOCs addressed by `keccak(id, owner)`. Two payloads then contend for one address, and `wintercluster find` walks exactly that feed. This was found by reading code, not by testing, and it is the shape of bug that testing finds late and by luck: it needs a specific interleaving of restore, write and checkpoint. A TLA+ or Alloy model of that state machine is perhaps a day's work and would either exhibit the trace or establish that a proposed fix admits none. If any formal work happens, it should be this.
+
+   **(c) Property-based tests** over the card's canonical JSON (round-trip, and *signature stability under reserialisation* — a canonicalisation that is not idempotent silently invalidates cards) and over seal/open of references. Not proof, but the best return per hour, and cheap in Go.
+
+   What is **not** worth attempting is whole-system verification. The failure modes this project has actually hit lived at boundaries a model would not have covered: a manifest library's fixed entry width, an S3 semantic that only the Ceph conformance suite encodes, a missing database migration, a test whose evidence collector raced and so passed by failing to look. Those are found by conformance suites, adversarial review, and drills. A proof would have said nothing about any of them.
+
+   Decide (a) with M5, since it changes what `card verify` promises. (b) is worth doing before M2 hardens the tier-B runbook. (c) needs no decision — just do it alongside the code.
+
 ## 14. Terminology
 
 **"Cluster" always means the Kubernetes cluster** — in this document, in code, in metric help strings, in user-facing output. The project's name is a pun on the bee formation, but the word is never reused for it: write `wintercluster` when you mean the project. The card schema's `cluster` field is the Kubernetes one.
